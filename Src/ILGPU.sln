@@ -1,7 +1,7 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 17
-VisualStudioVersion = 17.5.33516.290
+# Visual Studio Version 18
+VisualStudioVersion = 18.0.11111.16
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "ILGPU", "ILGPU\ILGPU.csproj", "{30A409A1-B627-4ED0-9CDD-69BA19996E7B}"
 	ProjectSection(ProjectDependencies) = postProject
@@ -35,6 +35,14 @@ EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "ILGPU.Analyzers", "ILGPU.Analyzers\ILGPU.Analyzers.csproj", "{ED6D4369-EC01-4822-B94E-6C3DCFD26A35}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ILGPU.Tests.Velocity128", "ILGPU.Tests.Velocity128\ILGPU.Tests.Velocity128.csproj", "{422BA1AE-858D-4AA4-815B-CF42A429D305}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution", "Solution", "{A58351E7-2803-4F96-9E4F-4D7464737016}"
+	ProjectSection(SolutionItems) = preProject
+		.editorconfig = .editorconfig
+		Directory.Build.props = Directory.Build.props
+	EndProjectSection
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ILGPU.Vulkan", "ILGPU.Vulkan\ILGPU.Vulkan.csproj", "{FBCE6BB5-9B04-6C33-F015-0BB40DB18784}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -98,6 +106,10 @@ Global
 		{422BA1AE-858D-4AA4-815B-CF42A429D305}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{422BA1AE-858D-4AA4-815B-CF42A429D305}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{422BA1AE-858D-4AA4-815B-CF42A429D305}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FBCE6BB5-9B04-6C33-F015-0BB40DB18784}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FBCE6BB5-9B04-6C33-F015-0BB40DB18784}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FBCE6BB5-9B04-6C33-F015-0BB40DB18784}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FBCE6BB5-9B04-6C33-F015-0BB40DB18784}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
