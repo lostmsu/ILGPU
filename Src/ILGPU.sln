@@ -44,6 +44,12 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution", "Solution", "{A5
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ILGPU.Vulkan", "ILGPU.Vulkan\ILGPU.Vulkan.csproj", "{FBCE6BB5-9B04-6C33-F015-0BB40DB18784}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VulkanPlayground", "..\Samples\VulkanPlayground\VulkanPlayground.csproj", "{0A71BD9C-565B-04D1-51F2-920B1A84DEC3}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Samples", "Samples", "{2924DA3E-34A4-40FD-8D41-398B4C9F00DA}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VulkanBackendSample", "..\Samples\VulkanBackendSample\VulkanBackendSample.csproj", "{6D11F61B-0CD4-01EB-3FDB-ED914A968C78}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -110,6 +116,14 @@ Global
 		{FBCE6BB5-9B04-6C33-F015-0BB40DB18784}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{FBCE6BB5-9B04-6C33-F015-0BB40DB18784}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{FBCE6BB5-9B04-6C33-F015-0BB40DB18784}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0A71BD9C-565B-04D1-51F2-920B1A84DEC3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0A71BD9C-565B-04D1-51F2-920B1A84DEC3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0A71BD9C-565B-04D1-51F2-920B1A84DEC3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0A71BD9C-565B-04D1-51F2-920B1A84DEC3}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6D11F61B-0CD4-01EB-3FDB-ED914A968C78}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6D11F61B-0CD4-01EB-3FDB-ED914A968C78}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6D11F61B-0CD4-01EB-3FDB-ED914A968C78}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6D11F61B-0CD4-01EB-3FDB-ED914A968C78}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -126,6 +140,7 @@ Global
 		{4AFD2AAD-FA52-43EA-B9A8-10E948F9A139} = {7701FE3C-4187-401C-9612-44667203B0E5}
 		{B0101B27-F153-4041-8DEE-741B651453D5} = {7701FE3C-4187-401C-9612-44667203B0E5}
 		{422BA1AE-858D-4AA4-815B-CF42A429D305} = {7701FE3C-4187-401C-9612-44667203B0E5}
+		{6D11F61B-0CD4-01EB-3FDB-ED914A968C78} = {2924DA3E-34A4-40FD-8D41-398B4C9F00DA}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {22270DEE-D42D-479D-A76F-B2E7A5F7C949}

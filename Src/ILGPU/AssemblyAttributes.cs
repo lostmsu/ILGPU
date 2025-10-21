@@ -6,3 +6,4 @@ using System.Runtime.CompilerServices;
 
 [assembly: InternalsVisibleTo("ILGPURuntime")]
 // [assembly: InternalsVisibleTo(Context.RuntimeAssemblyName)]
+[assembly: InternalsVisibleTo("ILGPU.Vulkan")]
