@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------------------
 
 using System;
+using ILGPU.Runtime;
 
 namespace ILGPU.Runtime.Vulkan;
 
@@ -44,4 +45,18 @@ public static class VulkanContextExtensions
         VulkanDevice.GetDevices(predicate, builder.DeviceRegistry);
         return builder;
     }
+}
+
+public static class VulkanContextDeviceExtensions
+{
+    // Context helpers mirroring CLContextExtensions
+
+    public static VulkanDevice GetVulkanDevice(this Context context, int index) =>
+        context.GetDevice<VulkanDevice>(index);
+
+    public static Context.DeviceCollection<VulkanDevice> GetVulkanDevices(this Context context) =>
+        context.GetDevices<VulkanDevice>();
+
+    public static VLAccelerator CreateVulkanAccelerator(this Context context, int index) =>
+        (VLAccelerator)context.GetVulkanDevice(index).CreateAccelerator(context);
 }
