@@ -40,8 +40,7 @@ public sealed class VLBackend : Backend
         if (!entryPoint.IsImplicitlyGrouped)
             throw new NotImplementedException("Only implicitly grouped kernels implemented");
 
-        var words = VLCodeGenerator.Generate(entryPoint, backendContext);
-        SpirvDebug.Dump("vl-last", words);
-        return new VLCompiledKernel(Context, entryPoint, null, words);
-    }
+            var result = VLCodeGenerator.Generate(entryPoint, backendContext);
+            return new VLCompiledKernel(Context, entryPoint, null, result.Words, result.Bindings);
+        }
 }

@@ -64,42 +64,56 @@ public sealed class VLKernel : Kernel
         }
     }
 
-    internal unsafe void EnsurePipeline(int bindingCount)
-    {
-        if (_pipeline.Handle != 0)
-            return;
+        internal unsafe void EnsurePipeline()
+        {
+            if (_pipeline.Handle != 0)
+                return;
 
         // Descriptor set layout with bindingCount storage buffers
         var vk = _acc.Vk;
         var dev = _acc.LogicalDevice;
 
-        var bindings = stackalloc DescriptorSetLayoutBinding[Math.Max(1, bindingCount)];
-        for (uint i = 0; i < (uint)bindingCount; i++)
-        {
-            bindings[i] = new DescriptorSetLayoutBinding
+            var bindingCount = _compiled.Bindings?.Length ?? 0;
+            var bindings = stackalloc DescriptorSetLayoutBinding[Math.Max(1, bindingCount)];
+            for (uint i = 0; i < (uint)bindingCount; i++)
             {
-                Binding = i,
-                DescriptorType = DescriptorType.StorageBuffer,
-                DescriptorCount = 1,
-                StageFlags = ShaderStageFlags.ShaderStageComputeBit,
+                bindings[i] = new DescriptorSetLayoutBinding
+                {
+                    Binding = i,
+                    DescriptorType = DescriptorType.StorageBuffer,
+                    DescriptorCount = 1,
+                    StageFlags = ShaderStageFlags.ComputeBit,
+                };
+            }
+            DescriptorSetLayoutCreateInfo dslci = new()
+            {
+                SType = StructureType.DescriptorSetLayoutCreateInfo,
+                BindingCount = (uint)bindingCount,
+                PBindings = bindings,
             };
-        }
-        DescriptorSetLayoutCreateInfo dslci = new()
-        {
-            SType = StructureType.DescriptorSetLayoutCreateInfo,
-            BindingCount = (uint)bindingCount,
-            PBindings = bindings,
-        };
         vk.CreateDescriptorSetLayout(dev, in dslci, null, out _dsl).ThrowOnError();
 
-        // Pipeline layout
+        // Pipeline layout (descriptor set + push constants for view lengths)
         var setLayouts = stackalloc DescriptorSetLayout[1];
         setLayouts[0] = _dsl;
+        PushConstantRange pcr = default;
+        var usePush = BindingCount > 0;
+        if (usePush)
+        {
+            pcr = new PushConstantRange
+            {
+                StageFlags = ShaderStageFlags.ComputeBit,
+                Offset = 0,
+                Size = (uint)(BindingCount * sizeof(int)),
+            };
+        }
         PipelineLayoutCreateInfo plci = new()
         {
             SType = StructureType.PipelineLayoutCreateInfo,
             SetLayoutCount = 1,
             PSetLayouts = setLayouts,
+            PushConstantRangeCount = usePush ? 1u : 0u,
+            PPushConstantRanges = usePush ? &pcr : null,
         };
         vk.CreatePipelineLayout(dev, in plci, null, out _layout).ThrowOnError();
 
@@ -108,7 +122,7 @@ public sealed class VLKernel : Kernel
         PipelineShaderStageCreateInfo ssc = new()
         {
             SType = StructureType.PipelineShaderStageCreateInfo,
-            Stage = ShaderStageFlags.ShaderStageComputeBit,
+            Stage = ShaderStageFlags.ComputeBit,
             Module = _module,
             PName = (byte*)Silk.NET.Core.Native.SilkMarshal.StringToPtr(entryName),
         };
@@ -131,4 +145,5 @@ public sealed class VLKernel : Kernel
     internal DescriptorSetLayout DescriptorSetLayout => _dsl;
     internal PipelineLayout PipelineLayout => _layout;
     internal Pipeline Pipeline => _pipeline;
+    internal int BindingCount => _compiled.Bindings?.Length ?? 0;
 }

@@ -7,17 +7,34 @@
 // ---------------------------------------------------------------------------------------
 
 using ILGPU.Backends.EntryPoints;
+using System;
 
 namespace ILGPU.Backends.Vulkan;
 
 internal static class VLCodeGenerator
 {
-    public static uint[] Generate(EntryPoint entryPoint, in Backend.BackendContext backendContext)
+    public readonly struct Result
+    {
+        public Result(uint[] words, VLCompiledKernel.BindingInfo[] bindings)
+        {
+            Words = words; Bindings = bindings;
+        }
+        public uint[] Words { get; }
+        public VLCompiledKernel.BindingInfo[] Bindings { get; }
+    }
+
+    public static Result Generate(EntryPoint entryPoint, in Backend.BackendContext backendContext)
     {
         var module = new SpirvModuleBuilder(entryPoint);
         var translator = new MinimalVlTranslator(module, entryPoint);
         translator.TranslateKernel(backendContext);
-        return module.ToUIntArray();
+        var words = module.ToUIntArray();
+        var spvPath = SpirvDebug.Dump("vl-last", words);
+        if (spvPath != null && string.Equals(Environment.GetEnvironmentVariable("ILGPU_VULKAN_MAP"), "1", StringComparison.Ordinal))
+        {
+            var map = module.BuildDebugMap();
+            SpirvDebug.WriteMapFor(spvPath, map);
+        }
+        return new Result(words, translator.GetBindings());
     }
 }
-

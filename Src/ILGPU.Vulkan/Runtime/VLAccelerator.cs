@@ -7,12 +7,14 @@
 // ---------------------------------------------------------------------------------------
 
 using ILGPU.Backends.IL;
+using ILGPU;
 using ILGPU.Resources;
 using Silk.NET.Core.Native;
 using Silk.NET.Vulkan;
 using VkDevice = Silk.NET.Vulkan.Device;
 using System;
 using System.Reflection;
+using ILGPU.Util;
 using System.Reflection.Emit;
 
 namespace ILGPU.Runtime.Vulkan;
@@ -23,6 +25,21 @@ namespace ILGPU.Runtime.Vulkan;
 [Obsolete("Not implemented")]
 public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulkan.VLCompiledKernel, VLKernel>
 {
+    #region Static
+
+    private static readonly MethodInfo Launch1OpenGeneric =
+        typeof(VLAccelerator).GetMethod(
+            nameof(Launch1),
+            BindingFlags.NonPublic | BindingFlags.Static)
+        .ThrowIfNull();
+
+    private static readonly MethodInfo Launch3OpenGeneric =
+        typeof(VLAccelerator).GetMethod(
+            nameof(Launch3),
+            BindingFlags.NonPublic | BindingFlags.Static)
+        .ThrowIfNull();
+
+    #endregion
     private readonly Vk _vk;
     private Instance _instance;
     private PhysicalDevice _physicalDevice;
@@ -164,19 +181,35 @@ public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulk
             MaxGroupSize,
             customGroupSize);
 
-        // Load first three ArrayView<T> args
-        emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + 0);
-        emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + 1);
-        emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + 2);
-
-        // Call VLAPI.LaunchKernelWithStreamBinding<T>
+        // Load ArrayView<T> args based on parameter count
         var paramTypes = entryPoint.Parameters;
-        var viewType = paramTypes[0];
-        var elemType = viewType.GetGenericArguments()[0];
-        var apiMethod = typeof(VLAPI).GetMethod(
-            nameof(VLAPI.LaunchKernelWithStreamBinding),
-            BindingFlags.NonPublic | BindingFlags.Static)!.MakeGenericMethod(elemType);
-        emitter.EmitCall(apiMethod);
+        int numArgs = paramTypes.Count;
+        if (numArgs < 1)
+            throw new NotSupportedException("Kernels without view parameters not yet supported");
+
+        // Currently support 1 and 3 view-parameter kernels
+        if (numArgs == 1)
+        {
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + 0);
+            var viewType = paramTypes[0];
+            var elemType = viewType.GetGenericArguments()[0];
+            var apiMethod = Launch1OpenGeneric.MakeGenericMethod(elemType);
+            emitter.EmitCall(apiMethod);
+        }
+        else if (numArgs >= 3)
+        {
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + 0);
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + 1);
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + 2);
+            var viewType = paramTypes[0];
+            var elemType = viewType.GetGenericArguments()[0];
+            var apiMethod = Launch3OpenGeneric.MakeGenericMethod(elemType);
+            emitter.EmitCall(apiMethod);
+        }
+        else
+        {
+            throw new NotImplementedException("Only 1 or 3 view parameters supported");
+        }
 
         emitter.Emit(OpCodes.Ret);
         emitter.Finish();
@@ -266,6 +299,26 @@ public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulk
             selected = pds[0];
         _physicalDevice = selected.Value;
     }
+
+    #region Launcher helpers
+    private static void Launch1<T>(
+        VLStream stream,
+        VLKernel kernel,
+        RuntimeKernelConfig config,
+        ArrayView<T> a)
+        where T : unmanaged
+        => VLAPI.LaunchKernelWithStreamBinding<T>(stream, kernel, config, a);
+
+    private static void Launch3<T>(
+        VLStream stream,
+        VLKernel kernel,
+        RuntimeKernelConfig config,
+        ArrayView<T> a,
+        ArrayView<T> b,
+        ArrayView<T> c)
+        where T : unmanaged
+        => VLAPI.LaunchKernelWithStreamBinding<T>(stream, kernel, config, a, b, c);
+    #endregion
 
     private void CreateDeviceAndQueue()
     {

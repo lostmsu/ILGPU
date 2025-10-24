@@ -18,6 +18,16 @@ internal sealed class SpirvWriter
     private readonly List<uint> _words = [];
     private int _headerIndex = -1;
 
+    // Encodes the first instruction word: high 16 bits = opcode, low 16 bits = word count
+    // SPIR-V instruction header layout: high 16 bits = WordCount, low 16 bits = Opcode
+    private static uint EncodeOpWord(Op op, uint wordCount)
+    {
+        if (wordCount == 0 || wordCount > 0xFFFF)
+            throw new ArgumentOutOfRangeException(nameof(wordCount));
+        uint opcode = (uint)op & 0xFFFFu;
+        return (wordCount << 16) | opcode;
+    }
+
     public void Header(uint version, uint generator, uint bound, uint schema)
     {
         _headerIndex = _words.Count;
@@ -36,10 +46,15 @@ internal sealed class SpirvWriter
 
     public void Write(Op op, params uint[] operands)
     {
-        uint wc = (uint)(1 + (operands?.Length ?? 0));
-        _words.Add(((uint)op) | (wc << 16));
-        if (operands != null)
-            _words.AddRange(operands);
+        Write(op, (ReadOnlySpan<uint>)operands);
+    }
+
+    public void Write(Op op, ReadOnlySpan<uint> operands)
+    {
+        uint wc = (uint)(1 + operands.Length);
+        _words.Add(EncodeOpWord(op, wc));
+        for (int i = 0; i < operands.Length; i++)
+            _words.Add(operands[i]);
     }
 
     public void OpEntryPointCompute(uint funcId, string name, uint[] interfaceIds)
@@ -57,6 +72,7 @@ internal sealed class SpirvWriter
 
     public byte[] ToArray()
     {
+        // SPIR-V binary streams use 32-bit words, little-endian byte order.
         var bytes = new byte[_words.Count * 4];
         for (int i = 0; i < _words.Count; i++)
             BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(i * 4, 4), _words[i]);
@@ -68,7 +84,7 @@ internal sealed class SpirvWriter
     private void EmitRaw(Op op, List<uint> operands)
     {
         uint wc = (uint)(1 + operands.Count);
-        _words.Add(((uint)op) | (wc << 16));
+        _words.Add(EncodeOpWord(op, wc));
         _words.AddRange(operands);
     }
 

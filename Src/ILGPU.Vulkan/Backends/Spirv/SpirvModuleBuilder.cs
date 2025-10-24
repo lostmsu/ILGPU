@@ -7,6 +7,8 @@
 // ---------------------------------------------------------------------------------------
 
 using ILGPU.Backends.EntryPoints;
+using ILGPU.IR;
+using ILGPU.IR.Types;
 using ILGPU.IR.Values;
 using Silk.NET.SPIRV;
 using System;
@@ -16,23 +18,57 @@ namespace ILGPU.Backends.Vulkan;
 
 internal sealed class SpirvModuleBuilder
 {
+    public sealed class Origin
+    {
+        public uint ResultId { get; init; }
+        public string Section { get; init; } = "func";
+        public int Ordinal { get; init; }
+        public uint BlockLabelId { get; init; }
+        public string? Method { get; init; }
+        public string? ValueKind { get; init; }
+        public string? Value { get; init; }
+    }
+
+    public sealed class DebugMap
+    {
+        public string EntryPoint { get; init; } = string.Empty;
+        public Origin[] Origins { get; init; } = Array.Empty<Origin>();
+    }
     private readonly SpirvWriter w = new();
     private uint nextId = 1;
     private readonly EntryPoint ep;
 
     private readonly uint idVoid, idFuncType;
-    private readonly uint idUint, idInt, idV3u;
+    private readonly uint idBool, idUint, idInt, idV3u;
+    private readonly Dictionary<BasicValueType, uint> primitiveTypeIds = new();
+    private readonly Dictionary<uint, uint> functionPtrTypeIds = new();
+    private readonly Dictionary<int, uint> constInt32 = new();
+    private readonly Dictionary<long, uint> constInt64 = new();
     private readonly uint idPtrInV3u, idPtrStorageUint, idPtrStorageInt;
+    private uint idPtrPushInt;
     private readonly uint idConst0;
     private readonly uint idGlGlobalInvocationId;
-    private readonly uint entryFuncId, labelId;
+    private readonly uint idGlNumWorkgroups;
+    private readonly uint entryFuncId;
     private bool functionStarted;
+    private readonly Dictionary<BasicBlock, uint> blockLabels = new();
 
     // Sectioned emission
     private readonly List<Action<SpirvWriter>> entryAndModes = [];
+    private readonly List<uint> entryInterface = [];
     private readonly List<Action<SpirvWriter>> annotations = [];
     private readonly List<Action<SpirvWriter>> typesGlobals = [];
     private readonly List<Action<SpirvWriter>> func = [];
+    private uint currentBlockLabelId;
+    private readonly Dictionary<uint, Origin> origins = new();
+
+    private string? currentMethod;
+    private string? currentValueKind;
+    private string? currentValueText;
+    // Push constants for view lengths
+    private uint pcStructId;
+    private uint pcVarId;
+    private uint pcMemberCount;
 
     public SpirvModuleBuilder(EntryPoint entryPoint)
     {
@@ -46,44 +82,108 @@ internal sealed class SpirvModuleBuilder
 
         // Prepare ids used by entry point and annotations
         idGlGlobalInvocationId = NewId();
+        idGlNumWorkgroups = NewId();
         entryFuncId = NewId();
-        labelId = NewId();
 
         // Entry point and execution mode (queued)
-        entryAndModes.Add(sw => sw.OpEntryPointCompute(entryFuncId, "main", [idGlGlobalInvocationId]));
+        entryInterface.Add(idGlGlobalInvocationId);
+        entryAndModes.Add(sw => sw.OpEntryPointCompute(entryFuncId, "main", entryInterface.ToArray()));
         entryAndModes.Add(sw => sw.OpExecutionModeLocalSize(entryFuncId, 64u, 1u, 1u));
 
         // Annotations (decorations) queued
         annotations.Add(sw => sw.Write(Op.Decorate, idGlGlobalInvocationId, (uint)Decoration.BuiltIn, (uint)BuiltIn.GlobalInvocationId));
+        annotations.Add(sw => sw.Write(Op.Decorate, idGlNumWorkgroups, (uint)Decoration.BuiltIn, (uint)BuiltIn.NumWorkgroups));
 
         // Types (queued)
         idVoid = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeVoid, idVoid));
+        idBool = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeBool, idBool));
         idUint = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeInt, idUint, 32u, 0u));
         idInt = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeInt, idInt, 32u, 1u));
         idV3u = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeVector, idV3u, idUint, 3u));
         idPtrInV3u = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypePointer, idPtrInV3u, (uint)StorageClass.Input, idV3u));
         idPtrStorageUint = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypePointer, idPtrStorageUint, (uint)StorageClass.StorageBuffer, idUint));
         idPtrStorageInt = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypePointer, idPtrStorageInt, (uint)StorageClass.StorageBuffer, idInt));
+        idPtrPushInt = 0; // deferred until DeclarePushConstants
         idFuncType = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeFunction, idFuncType, idVoid));
 
         // Globals (queued)
         typesGlobals.Add(sw => sw.Write(Op.Variable, idPtrInV3u, idGlGlobalInvocationId, (uint)StorageClass.Input));
+        typesGlobals.Add(sw => sw.Write(Op.Variable, idPtrInV3u, idGlNumWorkgroups, (uint)StorageClass.Input));
 
         // Constants (queued)
         idConst0 = NewId(); typesGlobals.Add(sw => sw.Write(Op.Constant, idUint, idConst0, 0u));
 
         functionStarted = false;
+        currentBlockLabelId = 0;
+    }
+
+    public void SetCurrentOrigin(string method, string valueKind, string value)
+    {
+        currentMethod = method;
+        currentValueKind = valueKind;
+        currentValueText = value;
+    }
+
+
+    public void DeclarePushConstants(uint lengthCount)
+    {
+        if (pcVarId != 0 || lengthCount == 0)
+            return;
+        pcMemberCount = lengthCount;
+        var members = new List<uint>((int)lengthCount);
+        for (uint i = 0; i < lengthCount; i++)
+            members.Add(idInt);
+        pcStructId = NewId();
+        var ops = new List<uint>(1 + members.Count);
+        ops.Add(pcStructId);
+        ops.AddRange(members);
+        typesGlobals.Add(sw => sw.Write(Op.TypeStruct, ops.ToArray()));
+        // Decorate members with offsets
+        for (uint i = 0; i < lengthCount; i++)
+        {
+            var offset = i * 4u;
+            var member = i; // member index
+            annotations.Add(sw => sw.Write(Op.MemberDecorate, pcStructId, member, (uint)Decoration.Offset, offset));
+        }
+        annotations.Add(sw => sw.Write(Op.Decorate, pcStructId, (uint)Decoration.Block));
+        // Pointer type and variable
+        idPtrPushInt = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypePointer, idPtrPushInt, (uint)StorageClass.PushConstant, idInt));
+        var ptrStruct = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypePointer, ptrStruct, (uint)StorageClass.PushConstant, pcStructId));
+        pcVarId = NewId(); typesGlobals.Add(sw => sw.Write(Op.Variable, ptrStruct, pcVarId, (uint)StorageClass.PushConstant));
+        // Optional: debug names can be added here if writer supports string literals
     }
 
     public void BeginFunction()
     {
         if (functionStarted) return;
         func.Add(sw => sw.Write(Op.Function, idVoid, entryFuncId, 0u, idFuncType));
-        func.Add(sw => sw.Write(Op.Label, labelId));
         functionStarted = true;
     }
 
     public uint NewId() => nextId++;
+
+    public void DeclareBlocks(Method method)
+    {
+        foreach (var block in method.Blocks)
+            blockLabels[block] = NewId();
+    }
+
+    public void BeginBlock(BasicBlock block)
+    {
+        BeginFunction();
+        if (blockLabels.TryGetValue(block, out var lbl))
+        {
+            func.Add(sw => sw.Write(Op.Label, lbl));
+            currentBlockLabelId = lbl;
+        }
+        else
+        {
+            var newLbl = NewId();
+            blockLabels[block] = newLbl;
+            func.Add(sw => sw.Write(Op.Label, newLbl));
+            currentBlockLabelId = newLbl;
+        }
+    }
 
     public (uint structId, uint varId) DeclareStorageBuffer(uint binding, bool unsigned)
     {
@@ -114,6 +214,15 @@ internal sealed class SpirvModuleBuilder
         return idx;
     }
 
+    public uint EmitLoadNumWorkgroups(DeviceConstantDimension3D dim)
+    {
+        BeginFunction();
+        var ng = NewId(); func.Add(sw => sw.Write(Op.Load, idV3u, ng, idGlNumWorkgroups));
+        var comp = dim switch { DeviceConstantDimension3D.Y => 1u, DeviceConstantDimension3D.Z => 2u, _ => 0u };
+        var val = NewId(); func.Add(sw => sw.Write(Op.CompositeExtract, idUint, val, ng, comp));
+        return val;
+    }
+
     public uint AccessChainElement(uint bufVarId, uint indexId, bool unsigned)
     {
         BeginFunction();
@@ -141,7 +250,268 @@ internal sealed class SpirvModuleBuilder
         return res;
     }
 
+    public uint EmitSub(uint aId, uint bId, bool unsigned)
+    {
+        BeginFunction();
+        var elem = unsigned ? idUint : idInt;
+        var res = NewId();
+        func.Add(sw => sw.Write(Op.ISub, elem, res, aId, bId));
+        return res;
+    }
+
+    public uint EmitMul(uint aId, uint bId, bool unsigned)
+    {
+        BeginFunction();
+        var elem = unsigned ? idUint : idInt;
+        var res = NewId();
+        func.Add(sw => sw.Write(Op.IMul, elem, res, aId, bId));
+        return res;
+    }
+
+    public uint EmitBitwiseAnd(uint aId, uint bId)
+    {
+        BeginFunction();
+        var res = NewId();
+        func.Add(sw => sw.Write(Op.BitwiseAnd, idInt, res, aId, bId));
+        return res;
+    }
+
+    public uint EmitBitwiseOr(uint aId, uint bId)
+    {
+        BeginFunction();
+        var res = NewId();
+        func.Add(sw => sw.Write(Op.BitwiseOr, idInt, res, aId, bId));
+        return res;
+    }
+
+    public uint EmitBitwiseXor(uint aId, uint bId)
+    {
+        BeginFunction();
+        var res = NewId();
+        func.Add(sw => sw.Write(Op.BitwiseXor, idInt, res, aId, bId));
+        return res;
+    }
+
+    public uint EmitLogicalAnd(uint aBoolId, uint bBoolId)
+    {
+        BeginFunction();
+        var res = NewId();
+        func.Add(sw => sw.Write(Op.LogicalAnd, idBool, res, aBoolId, bBoolId));
+        return res;
+    }
+
+    public uint EmitLogicalOr(uint aBoolId, uint bBoolId)
+    {
+        BeginFunction();
+        var res = NewId();
+        func.Add(sw => sw.Write(Op.LogicalOr, idBool, res, aBoolId, bBoolId));
+        return res;
+    }
+
+    public uint EmitSelect(uint condBoolId, uint trueValId, uint falseValId, bool unsigned)
+    {
+        BeginFunction();
+        var elem = unsigned ? idUint : idInt;
+        var res = NewId();
+        func.Add(sw => sw.Write(Op.Select, elem, res, condBoolId, trueValId, falseValId));
+        return res;
+    }
+
+    public uint EmitMulUint(uint aId, uint bId)
+    {
+        BeginFunction();
+        var res = NewId();
+        func.Add(sw => sw.Write(Op.IMul, idUint, res, aId, bId));
+        return res;
+    }
+
     public void EmitStore(uint ptr, uint val) { BeginFunction(); func.Add(sw => sw.Write(Op.Store, ptr, val)); }
+
+    public uint EmitIntBitcast(uint valueId, bool toUnsigned)
+    {
+        BeginFunction();
+        var targetType = toUnsigned ? idUint : idInt;
+        var res = NewId();
+        func.Add(sw => sw.Write(Op.Bitcast, targetType, res, valueId));
+        return res;
+    }
+
+    public uint EmitLoadViewLength(uint index)
+    {
+        if (pcVarId == 0)
+            throw new InvalidOperationException("Push constants not declared");
+        BeginFunction();
+        // Access member index
+        var memberIndexConstId = EmitConstInt32((int)index);
+        var ptr = NewId();
+        func.Add(sw => sw.Write(Op.AccessChain, idPtrPushInt, ptr, pcVarId, memberIndexConstId));
+        var val = NewId();
+        func.Add(sw => sw.Write(Op.Load, idInt, val, ptr));
+        return val;
+    }
+
+    private uint EnsurePrimitiveType(BasicValueType bvt)
+    {
+        if (primitiveTypeIds.TryGetValue(bvt, out var id))
+            return id;
+        uint newId = 0;
+        switch (bvt)
+        {
+            case BasicValueType.Int1:
+                newId = idBool; break;
+            case BasicValueType.Int32:
+                newId = idInt; break;
+            case BasicValueType.Int64:
+                throw new NotImplementedException("64-bit integers are not supported by Vulkan backend yet");
+            case BasicValueType.Float32:
+                newId = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeFloat, newId, 32u)); break;
+            case BasicValueType.Float64:
+                newId = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeFloat, newId, 64u)); break;
+            default:
+                // Fallback to 32-bit int
+                newId = idInt; break;
+        }
+        primitiveTypeIds[bvt] = newId;
+        return newId;
+    }
+
+    private uint EnsureFunctionPtrType(uint elemTypeId)
+    {
+        if (functionPtrTypeIds.TryGetValue(elemTypeId, out var ptrId))
+            return ptrId;
+        var newPtr = NewId();
+        typesGlobals.Add(sw => sw.Write(Op.TypePointer, newPtr, (uint)StorageClass.Function, elemTypeId));
+        functionPtrTypeIds[elemTypeId] = newPtr;
+        return newPtr;
+    }
+
+    public uint DeclareFunctionVariable(TypeNode elemType)
+    {
+        BeginFunction();
+        var prim = elemType as PrimitiveType;
+        var elemId = EnsurePrimitiveType(prim?.BasicValueType ?? BasicValueType.Int32);
+        var ptrType = EnsureFunctionPtrType(elemId);
+        var varId = NewId();
+        func.Add(sw => sw.Write(Op.Variable, ptrType, varId, (uint)StorageClass.Function));
+        return varId;
+    }
+
+    public uint EmitConstInt32(int value)
+    {
+        if (constInt32.TryGetValue(value, out var id))
+            return id;
+        var newId = NewId();
+        typesGlobals.Add(sw => sw.Write(Op.Constant, idInt, newId, unchecked((uint)value)));
+        constInt32[value] = newId;
+        origins[newId] = new Origin
+        {
+            ResultId = newId,
+            Section = "types",
+            Ordinal = typesGlobals.Count - 1,
+            BlockLabelId = 0,
+            Method = currentMethod,
+            ValueKind = currentValueKind,
+            Value = currentValueText,
+        };
+        return newId;
+    }
+
+    public uint EmitConstInt64(long value)
+    {
+        throw new NotImplementedException("64-bit integer constants are not supported by Vulkan backend yet");
+    }
+
+    public void EmitReturn()
+    {
+        BeginFunction();
+        func.Add(sw => sw.Write(Op.Return));
+    }
+
+    public void EmitBranch(BasicBlock target)
+    {
+        BeginFunction();
+        var targetId = blockLabels[target];
+        func.Add(sw => sw.Write(Op.Branch, targetId));
+    }
+
+    public void EmitBranchConditional(uint condId, BasicBlock trueTarget, BasicBlock falseTarget)
+    {
+        BeginFunction();
+        var t = blockLabels[trueTarget];
+        var f = blockLabels[falseTarget];
+        func.Add(sw => sw.Write(Op.BranchConditional, condId, t, f));
+    }
+
+    public void EmitSelectionMerge(BasicBlock merge)
+    {
+        BeginFunction();
+        var m = blockLabels[merge];
+        func.Add(sw => sw.Write(Op.SelectionMerge, m, 0u));
+    }
+
+    public uint EmitPhi(TypeNode type, ReadOnlySpan<(BasicBlock Pred, uint ValueId)> incomings)
+    {
+        BeginFunction();
+        var prim = type as PrimitiveType;
+        var typeId = EnsurePrimitiveType(prim?.BasicValueType ?? BasicValueType.Int32);
+        var resultId = NewId();
+        // Build operands: [resultType, resultId, (value, label)*]
+        var ops = new List<uint>(2 + incomings.Length * 2) { typeId, resultId };
+        foreach (var inc in incomings)
+        {
+            ops.Add(inc.ValueId);
+            ops.Add(blockLabels[inc.Pred]);
+        }
+        func.Add(sw =>
+        {
+            // Emit raw with dynamic operand array
+            sw.Write(Op.Phi, ops.ToArray());
+        });
+        return resultId;
+    }
+
+    public uint EmitCompareInt(uint leftId, uint rightId, CompareKind kind, bool unsigned)
+    {
+        BeginFunction();
+        var res = NewId();
+        Op op = kind switch
+        {
+            CompareKind.Equal => Op.IEqual,
+            CompareKind.NotEqual => Op.INotEqual,
+            CompareKind.LessThan => unsigned ? Op.ULessThan : Op.SLessThan,
+            CompareKind.LessEqual => unsigned ? Op.ULessThanEqual : Op.SLessThanEqual,
+            CompareKind.GreaterThan => unsigned ? Op.UGreaterThan : Op.SGreaterThan,
+            CompareKind.GreaterEqual => unsigned ? Op.UGreaterThanEqual : Op.SGreaterThanEqual,
+            _ => Op.IEqual,
+        };
+        func.Add(sw => sw.Write(op, idBool, res, leftId, rightId));
+        return res;
+    }
+
+    public void SetOrigin(uint resultId, string? method, string? valueKind, string? value)
+    {
+        var ordinal = func.Count;
+        origins[resultId] = new Origin
+        {
+            ResultId = resultId,
+            Section = "func",
+            Ordinal = ordinal,
+            BlockLabelId = currentBlockLabelId,
+            Method = method,
+            ValueKind = valueKind,
+            Value = value,
+        };
+    }
+
+    public DebugMap BuildDebugMap()
+    {
+        var arr = new List<Origin>(origins.Values).ToArray();
+        return new DebugMap
+        {
+            EntryPoint = ep.MethodInfo.Name,
+            Origins = arr,
+        };
+    }
 
     public byte[] ToArray()
     {

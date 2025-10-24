@@ -10,6 +10,7 @@ using System;
 using System.Buffers.Binary;
 using System.IO;
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace ILGPU.Backends.Vulkan;
 
@@ -51,7 +52,62 @@ internal static class SpirvDebug
         // Log the path in debug builds for discovery
         Debug.WriteLine($"[ILGPU.Vulkan] SPIR-V dump written: {fullPath}");
 
+        // Optional validation and disassembly
+        try
+        {
+            var validate = string.Equals(
+                Environment.GetEnvironmentVariable("ILGPU_VULKAN_VALIDATE"),
+                "1",
+                StringComparison.Ordinal);
+            if (validate)
+            {
+                if (SpirvValidator.TryValidate(fullPath, out var valOut))
+                {
+                    Debug.WriteLine("[ILGPU.Vulkan] spirv-val: OK");
+                }
+                else
+                {
+                    var valPath = Path.ChangeExtension(fullPath, ".val.txt");
+                    File.WriteAllText(valPath, valOut);
+                    Debug.WriteLine($"[ILGPU.Vulkan] spirv-val wrote: {valPath}");
+                }
+            }
+
+            var disassemble = string.Equals(
+                Environment.GetEnvironmentVariable("ILGPU_VULKAN_DIS"),
+                "1",
+                StringComparison.Ordinal);
+            if (disassemble)
+            {
+                if (SpirvValidator.TryDisassemble(fullPath, out var disOut))
+                {
+                    var disPath = Path.ChangeExtension(fullPath, ".dis.txt");
+                    File.WriteAllText(disPath, disOut);
+                    Debug.WriteLine($"[ILGPU.Vulkan] spirv-dis wrote: {disPath}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[ILGPU.Vulkan] SPIR-V validation error: {ex.Message}");
+        }
+
         return fullPath;
+    }
+
+    public static void WriteMapFor(string spvPath, SpirvModuleBuilder.DebugMap map)
+    {
+        try
+        {
+            var mapPath = Path.ChangeExtension(spvPath, ".map.json");
+            var json = JsonSerializer.Serialize(map, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(mapPath, json);
+            Debug.WriteLine($"[ILGPU.Vulkan] SPIR-V map written: {mapPath}");
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[ILGPU.Vulkan] SPIR-V map write error: {ex.Message}");
+        }
     }
 
 }
