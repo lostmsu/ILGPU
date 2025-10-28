@@ -39,7 +39,28 @@ public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulk
             BindingFlags.NonPublic | BindingFlags.Static)
         .ThrowIfNull();
 
+    private static readonly MethodInfo Launch2OpenGeneric =
+        typeof(VLAccelerator).GetMethod(
+            nameof(Launch2),
+            BindingFlags.NonPublic | BindingFlags.Static)
+        .ThrowIfNull();
+
+    private static readonly MethodInfo Launch3ScalarOpenGeneric =
+        typeof(VLAccelerator).GetMethod(
+            nameof(Launch3Scalar),
+            BindingFlags.NonPublic | BindingFlags.Static)
+        .ThrowIfNull();
+
     #endregion
+    private static bool IsAnyArrayViewType(Type t)
+    {
+        if (!t.IsGenericType) return false;
+        var g = t.GetGenericTypeDefinition();
+        return g == typeof(ArrayView<>) ||
+               g == typeof(ArrayView1D<,>) ||
+               g == typeof(ArrayView2D<,>) ||
+               g == typeof(ArrayView3D<,>);
+    }
     private readonly Vk _vk;
     private Instance _instance;
     private PhysicalDevice _physicalDevice;
@@ -181,34 +202,83 @@ public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulk
             MaxGroupSize,
             customGroupSize);
 
-        // Load ArrayView<T> args based on parameter count
-        var paramTypes = entryPoint.Parameters;
-        int numArgs = paramTypes.Count;
-        if (numArgs < 1)
-            throw new NotSupportedException("Kernels without view parameters not yet supported");
+        // Build a plan with the Vulkan argument mapper
+        var mapper = new ILGPU.Backends.Vulkan.VLArgumentMapper(Context);
+        var plan = mapper.BuildPlan(entryPoint);
 
-        // Currently support 1 and 3 view-parameter kernels
-        if (numArgs == 1)
+        var paramTypes = entryPoint.Parameters;
+        if (plan.ViewCount == 1 && plan.ScalarIntCount == 0)
         {
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + 0);
-            var viewType = paramTypes[0];
-            var elemType = viewType.GetGenericArguments()[0];
+            int p0 = plan.ViewParamIndices[0];
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + p0);
+            var elemType = paramTypes[p0].GetGenericArguments()[0];
             var apiMethod = Launch1OpenGeneric.MakeGenericMethod(elemType);
             emitter.EmitCall(apiMethod);
         }
-        else if (numArgs >= 3)
+        else if (plan.ViewCount == 2 && plan.ScalarIntCount == 1)
         {
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + 0);
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + 1);
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + 2);
-            var viewType = paramTypes[0];
-            var elemType = viewType.GetGenericArguments()[0];
-            var apiMethod = Launch3OpenGeneric.MakeGenericMethod(elemType);
-            emitter.EmitCall(apiMethod);
+            int v0 = plan.ViewParamIndices[0];
+            int v1 = plan.ViewParamIndices[1];
+            int s0 = plan.ScalarIntParamIndices[0];
+            var elemType = paramTypes[v0].GetGenericArguments()[0];
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + s0);
+            var api = typeof(VLAccelerator).GetMethod(nameof(Launch2Scalar), BindingFlags.NonPublic | BindingFlags.Static).ThrowIfNull();
+            emitter.EmitCall(api.MakeGenericMethod(elemType));
+        }
+        else if (plan.ViewCount == 2 && plan.ScalarIntCount == 0)
+        {
+            int v0 = plan.ViewParamIndices[0];
+            int v1 = plan.ViewParamIndices[1];
+            var elemType = paramTypes[v0].GetGenericArguments()[0];
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
+            emitter.EmitCall(Launch2OpenGeneric.MakeGenericMethod(elemType));
+        }
+        else if (plan.ViewCount == 3 && plan.ScalarIntCount == 0)
+        {
+            int v0 = plan.ViewParamIndices[0];
+            int v1 = plan.ViewParamIndices[1];
+            int v2 = plan.ViewParamIndices[2];
+            var elemType = paramTypes[v0].GetGenericArguments()[0];
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v2);
+            emitter.EmitCall(Launch3OpenGeneric.MakeGenericMethod(elemType));
+        }
+        else if (plan.ViewCount == 3 && plan.ScalarIntCount == 1)
+        {
+            int v0 = plan.ViewParamIndices[0];
+            int v1 = plan.ViewParamIndices[1];
+            int v2 = plan.ViewParamIndices[2];
+            int s0 = plan.ScalarIntParamIndices[0];
+            var elemType = paramTypes[v0].GetGenericArguments()[0];
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v2);
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + s0);
+            emitter.EmitCall(Launch3ScalarOpenGeneric.MakeGenericMethod(elemType));
+        }
+        else if (plan.ViewCount == 3 && plan.ScalarIntCount == 2)
+        {
+            int v0 = plan.ViewParamIndices[0];
+            int v1 = plan.ViewParamIndices[1];
+            int v2 = plan.ViewParamIndices[2];
+            int s0 = plan.ScalarIntParamIndices[0];
+            int s1 = plan.ScalarIntParamIndices[1];
+            var elemType = paramTypes[v0].GetGenericArguments()[0];
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v2);
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + s0);
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + s1);
+            var api = typeof(VLAccelerator).GetMethod(nameof(Launch3Scalar2), BindingFlags.NonPublic | BindingFlags.Static).ThrowIfNull();
+            emitter.EmitCall(api.MakeGenericMethod(elemType));
         }
         else
         {
-            throw new NotImplementedException("Only 1 or 3 view parameters supported");
+            throw new NotImplementedException($"Unsupported parameter layout: views={plan.ViewCount}, scalars={plan.ScalarIntCount}");
         }
 
         emitter.Emit(OpCodes.Ret);
@@ -310,14 +380,56 @@ public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulk
         => VLAPI.LaunchKernelWithStreamBinding<T>(stream, kernel, config, a);
 
     private static void Launch3<T>(
+          VLStream stream,
+          VLKernel kernel,
+          RuntimeKernelConfig config,
+          ArrayView<T> a,
+          ArrayView<T> b,
+          ArrayView<T> c)
+          where T : unmanaged
+          => VLAPI.LaunchKernelWithStreamBinding<T>(stream, kernel, config, a, b, c);
+
+    private static void Launch2<T>(
+          VLStream stream,
+          VLKernel kernel,
+          RuntimeKernelConfig config,
+          ArrayView<T> a,
+          ArrayView<T> b)
+          where T : unmanaged
+          => VLAPI.LaunchKernelWithStreamBinding<T>(stream, kernel, config, a, b);
+
+    private static void Launch2Scalar<T>(
         VLStream stream,
         VLKernel kernel,
         RuntimeKernelConfig config,
         ArrayView<T> a,
         ArrayView<T> b,
-        ArrayView<T> c)
+        int s0)
         where T : unmanaged
-        => VLAPI.LaunchKernelWithStreamBinding<T>(stream, kernel, config, a, b, c);
+        => VLAPI.LaunchKernelWithStreamBinding<T>(stream, kernel, config, a, b, s0);
+
+    private static void Launch3Scalar<T>(
+        VLStream stream,
+        VLKernel kernel,
+        RuntimeKernelConfig config,
+        ArrayView<T> a,
+        ArrayView<T> b,
+        ArrayView<T> c,
+        int s0)
+        where T : unmanaged
+        => VLAPI.LaunchKernelWithStreamBinding<T>(stream, kernel, config, a, b, c, s0);
+
+    private static void Launch3Scalar2<T>(
+        VLStream stream,
+        VLKernel kernel,
+        RuntimeKernelConfig config,
+        ArrayView<T> a,
+        ArrayView<T> b,
+        ArrayView<T> c,
+        int s0,
+        int s1)
+        where T : unmanaged
+        => VLAPI.LaunchKernelWithStreamBinding<T>(stream, kernel, config, a, b, c, s0, s1);
     #endregion
 
     private void CreateDeviceAndQueue()

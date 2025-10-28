@@ -87,9 +87,17 @@ internal static class SpirvDebug
                 }
             }
         }
-        catch (Exception ex)
+        catch (IOException ioEx)
         {
-            Debug.WriteLine($"[ILGPU.Vulkan] SPIR-V validation error: {ex.Message}");
+            Debug.WriteLine($"[ILGPU.Vulkan] SPIR-V validation IO error: {ioEx.Message}");
+        }
+        catch (UnauthorizedAccessException uaEx)
+        {
+            Debug.WriteLine($"[ILGPU.Vulkan] SPIR-V validation access error: {uaEx.Message}");
+        }
+        catch (ArgumentException argEx)
+        {
+            Debug.WriteLine($"[ILGPU.Vulkan] SPIR-V validation argument error: {argEx.Message}");
         }
 
         return fullPath;
@@ -104,9 +112,17 @@ internal static class SpirvDebug
             File.WriteAllText(mapPath, json);
             Debug.WriteLine($"[ILGPU.Vulkan] SPIR-V map written: {mapPath}");
         }
-        catch (Exception ex)
+        catch (IOException ioEx)
         {
-            Debug.WriteLine($"[ILGPU.Vulkan] SPIR-V map write error: {ex.Message}");
+            Debug.WriteLine($"[ILGPU.Vulkan] SPIR-V map write IO error: {ioEx.Message}");
+        }
+        catch (UnauthorizedAccessException uaEx)
+        {
+            Debug.WriteLine($"[ILGPU.Vulkan] SPIR-V map write access error: {uaEx.Message}");
+        }
+        catch (ArgumentException argEx)
+        {
+            Debug.WriteLine($"[ILGPU.Vulkan] SPIR-V map write argument error: {argEx.Message}");
         }
     }
 

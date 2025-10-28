@@ -41,6 +41,6 @@ public sealed class VLBackend : Backend
             throw new NotImplementedException("Only implicitly grouped kernels implemented");
 
             var result = VLCodeGenerator.Generate(entryPoint, backendContext);
-            return new VLCompiledKernel(Context, entryPoint, null, result.Words, result.Bindings);
+            return new VLCompiledKernel(Context, entryPoint, null, result.Words, result.Bindings, result.PushConstantCount);
         }
 }

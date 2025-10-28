@@ -15,12 +15,13 @@ internal static class VLCodeGenerator
 {
     public readonly struct Result
     {
-        public Result(uint[] words, VLCompiledKernel.BindingInfo[] bindings)
+        public Result(uint[] words, VLCompiledKernel.BindingInfo[] bindings, int pushConstantCount)
         {
-            Words = words; Bindings = bindings;
+            Words = words; Bindings = bindings; PushConstantCount = pushConstantCount;
         }
         public uint[] Words { get; }
         public VLCompiledKernel.BindingInfo[] Bindings { get; }
+        public int PushConstantCount { get; }
     }
 
     public static Result Generate(EntryPoint entryPoint, in Backend.BackendContext backendContext)
@@ -35,6 +36,6 @@ internal static class VLCodeGenerator
             var map = module.BuildDebugMap();
             SpirvDebug.WriteMapFor(spvPath, map);
         }
-        return new Result(words, translator.GetBindings());
+        return new Result(words, translator.GetBindings(), translator.GetPushConstantCount());
     }
 }

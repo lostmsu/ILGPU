@@ -93,18 +93,19 @@ public sealed class VLKernel : Kernel
             };
         vk.CreateDescriptorSetLayout(dev, in dslci, null, out _dsl).ThrowOnError();
 
-        // Pipeline layout (descriptor set + push constants for view lengths)
+        // Pipeline layout (descriptor set + push constants for view lengths and scalars)
         var setLayouts = stackalloc DescriptorSetLayout[1];
         setLayouts[0] = _dsl;
         PushConstantRange pcr = default;
-        var usePush = BindingCount > 0;
+        var totalPcCount = _compiled.PushConstantCount;
+        var usePush = totalPcCount > 0;
         if (usePush)
         {
             pcr = new PushConstantRange
             {
                 StageFlags = ShaderStageFlags.ComputeBit,
                 Offset = 0,
-                Size = (uint)(BindingCount * sizeof(int)),
+                Size = (uint)(totalPcCount * sizeof(int)),
             };
         }
         PipelineLayoutCreateInfo plci = new()

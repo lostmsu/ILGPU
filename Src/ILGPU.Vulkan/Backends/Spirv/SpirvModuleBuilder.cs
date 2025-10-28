@@ -40,10 +40,13 @@ internal sealed class SpirvModuleBuilder
 
     private readonly uint idVoid, idFuncType;
     private readonly uint idBool, idUint, idInt, idV3u;
+    private uint idLong, idULong;
     private readonly Dictionary<BasicValueType, uint> primitiveTypeIds = new();
     private readonly Dictionary<uint, uint> functionPtrTypeIds = new();
     private readonly Dictionary<int, uint> constInt32 = new();
     private readonly Dictionary<long, uint> constInt64 = new();
+    private uint constTrueId;
+    private uint constFalseId;
     private readonly uint idPtrInV3u, idPtrStorageUint, idPtrStorageInt;
     private uint idPtrPushInt;
     private readonly uint idConst0;
@@ -54,6 +57,8 @@ internal sealed class SpirvModuleBuilder
     private readonly Dictionary<BasicBlock, uint> blockLabels = new();
 
     // Sectioned emission
+    private readonly List<Action<SpirvWriter>> capabilities = [];
+    private Action<SpirvWriter>? memoryModel;
     private readonly List<Action<SpirvWriter>> entryAndModes = [];
     private readonly List<uint> entryInterface = [];
     private readonly List<Action<SpirvWriter>> annotations = [];
@@ -69,14 +74,20 @@ internal sealed class SpirvModuleBuilder
     private uint pcStructId;
     private uint pcVarId;
     private uint pcMemberCount;
+    // Track basic-block termination between labels
+    private bool hasAnyLabel;
+    private bool lastBlockHasTerminator = true;
 
     public SpirvModuleBuilder(EntryPoint entryPoint)
     {
         ep = entryPoint;
         w.Header(0x00010300u, 0u, 1u, 0u);
-        w.Write(Op.Capability, (uint)Capability.Shader);
-        // MemoryModel: GLSL450 (1)
-        w.Write(Op.MemoryModel,
+        // Queue baseline capability and memory model for ordered emission later
+        capabilities.Add(sw => sw.Write(Op.Capability, (uint)Capability.Shader));
+        // Enable 64-bit integers to support kernels with 64-bit element types
+        capabilities.Add(sw => sw.Write(Op.Capability, (uint)Capability.Int64));
+        memoryModel = sw => sw.Write(
+            Op.MemoryModel,
             (uint)AddressingModel.Logical,
             1u);
 
@@ -99,6 +110,7 @@ internal sealed class SpirvModuleBuilder
         idBool = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeBool, idBool));
         idUint = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeInt, idUint, 32u, 0u));
         idInt = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeInt, idInt, 32u, 1u));
+        // 64-bit integer types are declared lazily on first use with Int64 capability
         idV3u = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeVector, idV3u, idUint, 3u));
         idPtrInV3u = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypePointer, idPtrInV3u, (uint)StorageClass.Input, idV3u));
         idPtrStorageUint = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypePointer, idPtrStorageUint, (uint)StorageClass.StorageBuffer, idUint));
@@ -175,6 +187,8 @@ internal sealed class SpirvModuleBuilder
         {
             func.Add(sw => sw.Write(Op.Label, lbl));
             currentBlockLabelId = lbl;
+            hasAnyLabel = true;
+            lastBlockHasTerminator = false;
         }
         else
         {
@@ -182,6 +196,8 @@ internal sealed class SpirvModuleBuilder
             blockLabels[block] = newLbl;
             func.Add(sw => sw.Write(Op.Label, newLbl));
             currentBlockLabelId = newLbl;
+            hasAnyLabel = true;
+            lastBlockHasTerminator = false;
         }
     }
 
@@ -241,54 +257,134 @@ internal sealed class SpirvModuleBuilder
         return val;
     }
 
-    public uint EmitAdd(uint aId, uint bId, bool unsigned)
+    private bool capInt64Added;
+    private void EnsureInt64Capability()
+    {
+        if (!capInt64Added)
+        {
+            capInt64Added = true;
+            capabilities.Add(sw => sw.Write(Op.Capability, (uint)Capability.Int64));
+        }
+    }
+
+    private uint GetIntTypeId(int width, bool unsigned)
+    {
+        if (width == 64)
+        {
+            // Capability Int64 required when using 64-bit types
+            EnsureInt64Capability();
+            if (unsigned)
+            {
+                if (idULong == 0)
+                {
+                    idULong = NewId();
+                    typesGlobals.Add(sw => sw.Write(Op.TypeInt, idULong, 64u, 0u));
+                }
+                return idULong;
+            }
+            else
+            {
+                if (idLong == 0)
+                {
+                    idLong = NewId();
+                    typesGlobals.Add(sw => sw.Write(Op.TypeInt, idLong, 64u, 1u));
+                }
+                return idLong;
+            }
+        }
+        return unsigned ? idUint : idInt;
+    }
+
+    public uint EmitAdd(uint aId, uint bId, bool unsigned, int width = 32)
     {
         BeginFunction();
-        var elem = unsigned ? idUint : idInt;
+        var elem = GetIntTypeId(width, unsigned);
         var res = NewId();
         func.Add(sw => sw.Write(Op.IAdd, elem, res, aId, bId));
         return res;
     }
 
-    public uint EmitSub(uint aId, uint bId, bool unsigned)
+    public uint EmitSub(uint aId, uint bId, bool unsigned, int width = 32)
     {
         BeginFunction();
-        var elem = unsigned ? idUint : idInt;
+        var elem = GetIntTypeId(width, unsigned);
         var res = NewId();
         func.Add(sw => sw.Write(Op.ISub, elem, res, aId, bId));
         return res;
     }
 
-    public uint EmitMul(uint aId, uint bId, bool unsigned)
+    public uint EmitMul(uint aId, uint bId, bool unsigned, int width = 32)
     {
         BeginFunction();
-        var elem = unsigned ? idUint : idInt;
+        var elem = GetIntTypeId(width, unsigned);
         var res = NewId();
         func.Add(sw => sw.Write(Op.IMul, elem, res, aId, bId));
         return res;
     }
 
-    public uint EmitBitwiseAnd(uint aId, uint bId)
+    public uint EmitDiv(uint aId, uint bId, bool unsigned, int width = 32)
     {
         BeginFunction();
+        var elem = GetIntTypeId(width, unsigned);
         var res = NewId();
-        func.Add(sw => sw.Write(Op.BitwiseAnd, idInt, res, aId, bId));
+        var op = unsigned ? Op.UDiv : Op.SDiv;
+        func.Add(sw => sw.Write(op, elem, res, aId, bId));
         return res;
     }
 
-    public uint EmitBitwiseOr(uint aId, uint bId)
+    public uint EmitRem(uint aId, uint bId, bool unsigned, int width = 32)
     {
         BeginFunction();
+        var elem = GetIntTypeId(width, unsigned);
         var res = NewId();
-        func.Add(sw => sw.Write(Op.BitwiseOr, idInt, res, aId, bId));
+        var op = unsigned ? Op.UMod : Op.SRem;
+        func.Add(sw => sw.Write(op, elem, res, aId, bId));
         return res;
     }
 
-    public uint EmitBitwiseXor(uint aId, uint bId)
+    public uint EmitShiftLeft(uint aId, uint bId, int width = 32)
+    {
+        BeginFunction();
+        var elem = GetIntTypeId(width, false);
+        var res = NewId();
+        func.Add(sw => sw.Write(Op.ShiftLeftLogical, elem, res, aId, bId));
+        return res;
+    }
+
+    public uint EmitShiftRight(uint aId, uint bId, bool unsigned, int width = 32)
+    {
+        BeginFunction();
+        var elem = GetIntTypeId(width, unsigned);
+        var res = NewId();
+        var op = unsigned ? Op.ShiftRightLogical : Op.ShiftRightArithmetic;
+        func.Add(sw => sw.Write(op, elem, res, aId, bId));
+        return res;
+    }
+
+    public uint EmitBitwiseAnd(uint aId, uint bId, int width = 32)
     {
         BeginFunction();
         var res = NewId();
-        func.Add(sw => sw.Write(Op.BitwiseXor, idInt, res, aId, bId));
+        var ty = width == 64 ? GetIntTypeId(64, false) : idInt;
+        func.Add(sw => sw.Write(Op.BitwiseAnd, ty, res, aId, bId));
+        return res;
+    }
+
+    public uint EmitBitwiseOr(uint aId, uint bId, int width = 32)
+    {
+        BeginFunction();
+        var res = NewId();
+        var ty = width == 64 ? GetIntTypeId(64, false) : idInt;
+        func.Add(sw => sw.Write(Op.BitwiseOr, ty, res, aId, bId));
+        return res;
+    }
+
+    public uint EmitBitwiseXor(uint aId, uint bId, int width = 32)
+    {
+        BeginFunction();
+        var res = NewId();
+        var ty = width == 64 ? GetIntTypeId(64, false) : idInt;
+        func.Add(sw => sw.Write(Op.BitwiseXor, ty, res, aId, bId));
         return res;
     }
 
@@ -336,6 +432,17 @@ internal sealed class SpirvModuleBuilder
         return res;
     }
 
+    public uint EmitConvertI32ToI64(uint srcId, bool unsigned)
+    {
+        BeginFunction();
+        // Ensure 64-bit integer type
+        var dstTy = GetIntTypeId(64, unsigned);
+        var res = NewId();
+        var op = unsigned ? Op.UConvert : Op.SConvert;
+        func.Add(sw => sw.Write(op, dstTy, res, srcId));
+        return res;
+    }
+
     public uint EmitLoadViewLength(uint index)
     {
         if (pcVarId == 0)
@@ -362,7 +469,14 @@ internal sealed class SpirvModuleBuilder
             case BasicValueType.Int32:
                 newId = idInt; break;
             case BasicValueType.Int64:
-                throw new NotImplementedException("64-bit integers are not supported by Vulkan backend yet");
+                // Enable Int64 capability and lazily declare 64-bit int type
+                EnsureInt64Capability();
+                if (idLong == 0)
+                {
+                    idLong = NewId();
+                    typesGlobals.Add(sw => sw.Write(Op.TypeInt, idLong, 64u, 1u));
+                }
+                newId = idLong; break;
             case BasicValueType.Float32:
                 newId = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeFloat, newId, 32u)); break;
             case BasicValueType.Float64:
@@ -418,13 +532,59 @@ internal sealed class SpirvModuleBuilder
 
     public uint EmitConstInt64(long value)
     {
-        throw new NotImplementedException("64-bit integer constants are not supported by Vulkan backend yet");
+        if (constInt64.TryGetValue(value, out var id))
+            return id;
+        // Ensure capability and type
+        EnsureInt64Capability();
+        if (idLong == 0)
+        {
+            idLong = NewId();
+            typesGlobals.Add(sw => sw.Write(Op.TypeInt, idLong, 64u, 1u));
+        }
+        var newId = NewId();
+        // Constants take their bit-pattern split into 32-bit words (low, high)
+        unchecked
+        {
+            var low = (uint)(value & 0xFFFFFFFFL);
+            var high = (uint)((ulong)value >> 32);
+            typesGlobals.Add(sw => sw.Write(Op.Constant, idLong, newId, low, high));
+        }
+        constInt64[value] = newId;
+        return newId;
+    }
+
+    public uint EmitConstBool(bool value)
+    {
+        if (value)
+        {
+            if (constTrueId != 0) return constTrueId;
+            constTrueId = NewId();
+            typesGlobals.Add(sw => sw.Write(Op.ConstantTrue, idBool, constTrueId));
+            return constTrueId;
+        }
+        else
+        {
+            if (constFalseId != 0) return constFalseId;
+            constFalseId = NewId();
+            typesGlobals.Add(sw => sw.Write(Op.ConstantFalse, idBool, constFalseId));
+            return constFalseId;
+        }
+    }
+
+    public uint EmitConvertI64ToI32(uint srcId, bool unsigned)
+    {
+        BeginFunction();
+        var res = NewId();
+        var op = unsigned ? Op.UConvert : Op.SConvert;
+        func.Add(sw => sw.Write(op, idInt, res, srcId));
+        return res;
     }
 
     public void EmitReturn()
     {
         BeginFunction();
         func.Add(sw => sw.Write(Op.Return));
+        lastBlockHasTerminator = true;
     }
 
     public void EmitBranch(BasicBlock target)
@@ -432,6 +592,7 @@ internal sealed class SpirvModuleBuilder
         BeginFunction();
         var targetId = blockLabels[target];
         func.Add(sw => sw.Write(Op.Branch, targetId));
+        lastBlockHasTerminator = true;
     }
 
     public void EmitBranchConditional(uint condId, BasicBlock trueTarget, BasicBlock falseTarget)
@@ -440,6 +601,7 @@ internal sealed class SpirvModuleBuilder
         var t = blockLabels[trueTarget];
         var f = blockLabels[falseTarget];
         func.Add(sw => sw.Write(Op.BranchConditional, condId, t, f));
+        lastBlockHasTerminator = true;
     }
 
     public void EmitSelectionMerge(BasicBlock merge)
@@ -517,10 +679,13 @@ internal sealed class SpirvModuleBuilder
     {
         if (functionStarted)
         {
-            func.Add(sw => sw.Write(Op.Return));
+            if (!lastBlockHasTerminator)
+                func.Add(sw => sw.Write(Op.Return));
             func.Add(sw => sw.Write(Op.FunctionEnd));
         }
         // Emit sections in required order
+        foreach (var c in capabilities) c(w);
+        memoryModel?.Invoke(w);
         foreach (var e in entryAndModes) e(w);
         foreach (var a in annotations) a(w);
         foreach (var t in typesGlobals) t(w);
@@ -533,9 +698,12 @@ internal sealed class SpirvModuleBuilder
     {
         if (functionStarted)
         {
-            func.Add(sw => sw.Write(Op.Return));
+            if (!lastBlockHasTerminator)
+                func.Add(sw => sw.Write(Op.Return));
             func.Add(sw => sw.Write(Op.FunctionEnd));
         }
+        foreach (var c in capabilities) c(w);
+        memoryModel?.Invoke(w);
         foreach (var e in entryAndModes) e(w);
         foreach (var a in annotations) a(w);
         foreach (var t in typesGlobals) t(w);
@@ -544,4 +712,3 @@ internal sealed class SpirvModuleBuilder
         return w.ToUIntArray();
     }
 }
-

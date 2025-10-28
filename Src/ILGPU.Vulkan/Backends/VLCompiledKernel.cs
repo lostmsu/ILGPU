@@ -33,11 +33,13 @@ public sealed class VLCompiledKernel : CompiledKernel
         EntryPoint entryPoint,
         KernelInfo? info,
         uint[] spirv,
-        BindingInfo[] bindings)
+        BindingInfo[] bindings,
+        int pushConstantCount)
         : base(context, entryPoint, info)
     {
         SpirvWords = spirv;
         Bindings = bindings;
+        PushConstantCount = pushConstantCount;
     }
 
     /// <summary>
@@ -49,4 +51,10 @@ public sealed class VLCompiledKernel : CompiledKernel
     /// Descriptor-set bindings generated at compile-time.
     /// </summary>
     public BindingInfo[] Bindings { get; }
+
+    /// <summary>
+    /// Number of 32-bit integers used in the push-constant block.
+    /// This typically contains all view lengths followed by scalar ints.
+    /// </summary>
+    public int PushConstantCount { get; }
 }
