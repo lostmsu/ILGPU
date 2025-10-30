@@ -8,6 +8,7 @@
 
 using ILGPU;
 using ILGPU.Runtime;
+using System;
 using Silk.NET.Vulkan;
 
 namespace ILGPU.Runtime.Vulkan;
@@ -27,6 +28,8 @@ internal static class VLAPI
             Range = (ulong)view.LengthInBytes,
         };
     }
+
+    // Note: Additional overloads for ArrayView1D/2D/3D can be added later if needed.
 
     // Records and submits a compute dispatch with optional push-constants
     private static unsafe void BindAndDispatch(
@@ -192,6 +195,42 @@ internal static class VLAPI
         }
     }
 
+    // Unified span-based dispatch entry (internal helper)
+    internal static unsafe void LaunchKernel(
+        VLStream stream,
+        VLKernel kernel,
+        RuntimeKernelConfig config,
+        ReadOnlySpan<DescriptorBufferInfo> buffers,
+        ReadOnlySpan<int> pushConstants)
+    {
+        var acc = (VLAccelerator)stream.Accelerator;
+        var vk = acc.Vk;
+        var dev = acc.LogicalDevice;
+        kernel.EnsurePipeline();
+
+        DescriptorBufferInfo* pInfos = stackalloc DescriptorBufferInfo[buffers.Length];
+        for (int i = 0; i < buffers.Length; i++) pInfos[i] = buffers[i];
+        var dset = AllocateAndWrite(vk, dev, kernel.DescriptorSetLayout, pInfos, (uint)buffers.Length, out var pool);
+        try
+        {
+            if (pushConstants.IsEmpty)
+            {
+                BindAndDispatch(vk, dev, stream, kernel, dset, config, null, 0u);
+            }
+            else
+            {
+                fixed (int* pPc = pushConstants)
+                {
+                    BindAndDispatch(vk, dev, stream, kernel, dset, config, pPc, (uint)pushConstants.Length);
+                }
+            }
+        }
+        finally
+        {
+            vk.DestroyDescriptorPool(dev, pool, null);
+        }
+    }
+
     // 2 views + 1 scalar int
     internal static unsafe void LaunchKernelWithStreamBinding<T>(
         VLStream stream,
@@ -234,6 +273,74 @@ internal static class VLAPI
         ArrayView<T> b,
         ArrayView<T> c)
         where T : unmanaged
+    {
+        var acc = (VLAccelerator)stream.Accelerator;
+        var vk = acc.Vk;
+        var dev = acc.LogicalDevice;
+        kernel.EnsurePipeline();
+
+        var info = stackalloc DescriptorBufferInfo[3];
+        info[0] = GetBufferInfo(a);
+        info[1] = GetBufferInfo(b);
+        info[2] = GetBufferInfo(c);
+        var dset = AllocateAndWrite(vk, dev, kernel.DescriptorSetLayout, info, 3, out var pool);
+        try
+        {
+            var vals = stackalloc int[3];
+            vals[0] = (int)a.Length;
+            vals[1] = (int)b.Length;
+            vals[2] = (int)c.Length;
+            BindAndDispatch(vk, dev, stream, kernel, dset, config, vals, 3u);
+        }
+        finally
+        {
+            vk.DestroyDescriptorPool(dev, pool, null);
+        }
+    }
+
+    // 2 views (heterogeneous element types)
+    internal static unsafe void LaunchKernelWithStreamBinding<T0, T1>(
+        VLStream stream,
+        VLKernel kernel,
+        RuntimeKernelConfig config,
+        ArrayView<T0> a,
+        ArrayView<T1> b)
+        where T0 : unmanaged
+        where T1 : unmanaged
+    {
+        var acc = (VLAccelerator)stream.Accelerator;
+        var vk = acc.Vk;
+        var dev = acc.LogicalDevice;
+        kernel.EnsurePipeline();
+
+        var info = stackalloc DescriptorBufferInfo[2];
+        info[0] = GetBufferInfo(a);
+        info[1] = GetBufferInfo(b);
+        var dset = AllocateAndWrite(vk, dev, kernel.DescriptorSetLayout, info, 2, out var pool);
+        try
+        {
+            var vals = stackalloc int[2];
+            vals[0] = (int)a.Length;
+            vals[1] = (int)b.Length;
+            BindAndDispatch(vk, dev, stream, kernel, dset, config, vals, 2u);
+        }
+        finally
+        {
+            vk.DestroyDescriptorPool(dev, pool, null);
+        }
+    }
+
+    // 3 views (heterogeneous element types)
+    internal static unsafe void LaunchKernelWithStreamBinding<T0, T1, T2>(
+        VLStream stream,
+        VLKernel kernel,
+        RuntimeKernelConfig config,
+        ArrayView<T0> a,
+        ArrayView<T1> b,
+        ArrayView<T2> c)
+        where T0 : unmanaged
+        where T1 : unmanaged
+        where T2 : unmanaged
     {
         var acc = (VLAccelerator)stream.Accelerator;
         var vk = acc.Vk;

@@ -16,6 +16,7 @@ using System;
 using System.Reflection;
 using ILGPU.Util;
 using System.Reflection.Emit;
+using System.Linq;
 
 namespace ILGPU.Runtime.Vulkan;
 
@@ -207,78 +208,138 @@ public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulk
         var plan = mapper.BuildPlan(entryPoint);
 
         var paramTypes = entryPoint.Parameters;
-        if (plan.ViewCount == 1 && plan.ScalarIntCount == 0)
+        // If all view element types are identical, we can use generic helpers; otherwise
+        // fall back to mixed-type non-generic launchers using IArrayView.
+        bool AllSameElemType()
         {
-            int p0 = plan.ViewParamIndices[0];
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + p0);
-            var elemType = paramTypes[p0].GetGenericArguments()[0];
-            var apiMethod = Launch1OpenGeneric.MakeGenericMethod(elemType);
-            emitter.EmitCall(apiMethod);
+            if (plan.ViewCount <= 1) return true;
+            var first = paramTypes[plan.ViewParamIndices[0]].GetGenericArguments()[0];
+            for (int i = 1; i < plan.ViewCount; i++)
+            {
+                var t = paramTypes[plan.ViewParamIndices[i]].GetGenericArguments()[0];
+                if (!ReferenceEquals(t, first)) return false;
+            }
+            return true;
         }
-        else if (plan.ViewCount == 2 && plan.ScalarIntCount == 1)
+
+        if (!AllSameElemType())
         {
-            int v0 = plan.ViewParamIndices[0];
-            int v1 = plan.ViewParamIndices[1];
-            int s0 = plan.ScalarIntParamIndices[0];
-            var elemType = paramTypes[v0].GetGenericArguments()[0];
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + s0);
-            var api = typeof(VLAccelerator).GetMethod(nameof(Launch2Scalar), BindingFlags.NonPublic | BindingFlags.Static).ThrowIfNull();
-            emitter.EmitCall(api.MakeGenericMethod(elemType));
-        }
-        else if (plan.ViewCount == 2 && plan.ScalarIntCount == 0)
-        {
-            int v0 = plan.ViewParamIndices[0];
-            int v1 = plan.ViewParamIndices[1];
-            var elemType = paramTypes[v0].GetGenericArguments()[0];
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
-            emitter.EmitCall(Launch2OpenGeneric.MakeGenericMethod(elemType));
-        }
-        else if (plan.ViewCount == 3 && plan.ScalarIntCount == 0)
-        {
-            int v0 = plan.ViewParamIndices[0];
-            int v1 = plan.ViewParamIndices[1];
-            int v2 = plan.ViewParamIndices[2];
-            var elemType = paramTypes[v0].GetGenericArguments()[0];
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v2);
-            emitter.EmitCall(Launch3OpenGeneric.MakeGenericMethod(elemType));
-        }
-        else if (plan.ViewCount == 3 && plan.ScalarIntCount == 1)
-        {
-            int v0 = plan.ViewParamIndices[0];
-            int v1 = plan.ViewParamIndices[1];
-            int v2 = plan.ViewParamIndices[2];
-            int s0 = plan.ScalarIntParamIndices[0];
-            var elemType = paramTypes[v0].GetGenericArguments()[0];
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v2);
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + s0);
-            emitter.EmitCall(Launch3ScalarOpenGeneric.MakeGenericMethod(elemType));
-        }
-        else if (plan.ViewCount == 3 && plan.ScalarIntCount == 2)
-        {
-            int v0 = plan.ViewParamIndices[0];
-            int v1 = plan.ViewParamIndices[1];
-            int v2 = plan.ViewParamIndices[2];
-            int s0 = plan.ScalarIntParamIndices[0];
-            int s1 = plan.ScalarIntParamIndices[1];
-            var elemType = paramTypes[v0].GetGenericArguments()[0];
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v2);
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + s0);
-            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + s1);
-            var api = typeof(VLAccelerator).GetMethod(nameof(Launch3Scalar2), BindingFlags.NonPublic | BindingFlags.Static).ThrowIfNull();
-            emitter.EmitCall(api.MakeGenericMethod(elemType));
+            if (plan.ScalarIntCount == 0 && plan.ViewCount == 3)
+            {
+                // Generic heterogeneous 3-view path: VLAPI.LaunchKernelWithStreamBinding<T0,T1,T2>
+                int v0 = plan.ViewParamIndices[0];
+                int v1 = plan.ViewParamIndices[1];
+                int v2 = plan.ViewParamIndices[2];
+                var t0 = paramTypes[v0].GetGenericArguments()[0];
+                var t1 = paramTypes[v1].GetGenericArguments()[0];
+                var t2 = paramTypes[v2].GetGenericArguments()[0];
+                var api = typeof(VLAPI).GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
+                    .First(m => m.Name == nameof(VLAPI.LaunchKernelWithStreamBinding)
+                        && m.IsGenericMethodDefinition
+                        && m.GetGenericArguments().Length == 3
+                        && m.GetParameters().Length == 6);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v2);
+                emitter.EmitCall(api.MakeGenericMethod(t0, t1, t2));
+            }
+            else if (plan.ScalarIntCount == 0 && plan.ViewCount == 2)
+            {
+                // Generic heterogeneous 2-view path: VLAPI.LaunchKernelWithStreamBinding<T0,T1>
+                int v0 = plan.ViewParamIndices[0];
+                int v1 = plan.ViewParamIndices[1];
+                var t0 = paramTypes[v0].GetGenericArguments()[0];
+                var t1 = paramTypes[v1].GetGenericArguments()[0];
+                var api = typeof(VLAPI).GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
+                    .First(m => m.Name == nameof(VLAPI.LaunchKernelWithStreamBinding)
+                        && m.IsGenericMethodDefinition
+                        && m.GetGenericArguments().Length == 2
+                        && m.GetParameters().Length == 5);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
+                emitter.EmitCall(api.MakeGenericMethod(t0, t1));
+            }
+            else
+            {
+                throw new NotImplementedException($"Unsupported heterogeneous layout: views={plan.ViewCount}, scalars={plan.ScalarIntCount}");
+            }
         }
         else
         {
-            throw new NotImplementedException($"Unsupported parameter layout: views={plan.ViewCount}, scalars={plan.ScalarIntCount}");
+            // Original generic paths
+            if (plan.ViewCount == 1 && plan.ScalarIntCount == 0)
+            {
+                int p0 = plan.ViewParamIndices[0];
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + p0);
+                var elemType = paramTypes[p0].GetGenericArguments()[0];
+                var apiMethod = Launch1OpenGeneric.MakeGenericMethod(elemType);
+                emitter.EmitCall(apiMethod);
+            }
+            else if (plan.ViewCount == 2 && plan.ScalarIntCount == 1)
+            {
+                int v0 = plan.ViewParamIndices[0];
+                int v1 = plan.ViewParamIndices[1];
+                int s0 = plan.ScalarIntParamIndices[0];
+                var elemType = paramTypes[v0].GetGenericArguments()[0];
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + s0);
+                var api = typeof(VLAccelerator).GetMethod(nameof(Launch2Scalar), BindingFlags.NonPublic | BindingFlags.Static).ThrowIfNull();
+                emitter.EmitCall(api.MakeGenericMethod(elemType));
+            }
+            else if (plan.ViewCount == 2 && plan.ScalarIntCount == 0)
+            {
+                int v0 = plan.ViewParamIndices[0];
+                int v1 = plan.ViewParamIndices[1];
+                var elemType = paramTypes[v0].GetGenericArguments()[0];
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
+                emitter.EmitCall(Launch2OpenGeneric.MakeGenericMethod(elemType));
+            }
+            else if (plan.ViewCount == 3 && plan.ScalarIntCount == 0)
+            {
+                int v0 = plan.ViewParamIndices[0];
+                int v1 = plan.ViewParamIndices[1];
+                int v2 = plan.ViewParamIndices[2];
+                var elemType = paramTypes[v0].GetGenericArguments()[0];
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v2);
+                emitter.EmitCall(Launch3OpenGeneric.MakeGenericMethod(elemType));
+            }
+            else if (plan.ViewCount == 3 && plan.ScalarIntCount == 1)
+            {
+                int v0 = plan.ViewParamIndices[0];
+                int v1 = plan.ViewParamIndices[1];
+                int v2 = plan.ViewParamIndices[2];
+                int s0 = plan.ScalarIntParamIndices[0];
+                var elemType = paramTypes[v0].GetGenericArguments()[0];
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v2);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + s0);
+                emitter.EmitCall(Launch3ScalarOpenGeneric.MakeGenericMethod(elemType));
+            }
+            else if (plan.ViewCount == 3 && plan.ScalarIntCount == 2)
+            {
+                int v0 = plan.ViewParamIndices[0];
+                int v1 = plan.ViewParamIndices[1];
+                int v2 = plan.ViewParamIndices[2];
+                int s0 = plan.ScalarIntParamIndices[0];
+                int s1 = plan.ScalarIntParamIndices[1];
+                var elemType = paramTypes[v0].GetGenericArguments()[0];
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v2);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + s0);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + s1);
+                var api = typeof(VLAccelerator).GetMethod(nameof(Launch3Scalar2), BindingFlags.NonPublic | BindingFlags.Static).ThrowIfNull();
+                emitter.EmitCall(api.MakeGenericMethod(elemType));
+            }
+            else
+            {
+                throw new NotImplementedException($"Unsupported parameter layout: views={plan.ViewCount}, scalars={plan.ScalarIntCount}");
+            }
         }
 
         emitter.Emit(OpCodes.Ret);

@@ -611,6 +611,14 @@ internal sealed class SpirvModuleBuilder
         func.Add(sw => sw.Write(Op.SelectionMerge, m, 0u));
     }
 
+    public void EmitLoopMerge(BasicBlock merge, BasicBlock continueTarget)
+    {
+        BeginFunction();
+        var m = blockLabels[merge];
+        var c = blockLabels[continueTarget];
+        func.Add(sw => sw.Write(Op.LoopMerge, m, c, 0u));
+    }
+
     public uint EmitPhi(TypeNode type, ReadOnlySpan<(BasicBlock Pred, uint ValueId)> incomings)
     {
         BeginFunction();

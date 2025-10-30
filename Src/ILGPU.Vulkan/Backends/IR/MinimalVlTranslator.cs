@@ -27,8 +27,17 @@ internal sealed class MinimalVlTranslator
     private readonly List<VLCompiledKernel.BindingInfo> bindings = [];
     // Element size per descriptor binding (bytes of the view's T)
     private readonly Dictionary<uint, int> bindingElemSize = new();
+    // Map storage buffer varId -> binding for reliable PC slot resolution
+    private readonly Dictionary<uint, uint> varIdToBinding = new();
+    // Map binding -> storage buffer varId for reverse lookup
+    private readonly Dictionary<uint, uint> bindingToVarId = new();
+    // Scalar int parameter -> push-constant slot index
+    private readonly Dictionary<int, uint> scalarPcIndex = new();
+    private int totalPcCount;
     private Dominators<Backwards>? postDom;
+    private Dominators<Forwards>? dom;
     private readonly Stack<BasicBlock> selectionMergeStack = new();
+    private readonly Dictionary<BasicBlock, (BasicBlock Merge, BasicBlock Continue)> loopInfo = new();
 
     private static bool IsAnyArrayViewType(Type t)
     {
@@ -79,9 +88,13 @@ internal sealed class MinimalVlTranslator
         {
             VLTrace.Log($"IR Param idx={p.Index} type={p.ParameterType}");
         }
+        // Dominator analyses
+        dom = method.Blocks.CreateDominators();
         postDom = method.Blocks.CreatePostDominators();
         // Predeclare block labels for CFG emission
         m.DeclareBlocks(method);
+        // Build simple loop info (headers, merge, continue) using back-edges
+        BuildLoopInfo(method);
         uint binding = 0;
         // Build bindings based on entry-point parameter types; map to IR parameter indices
         for (int i = 0, e = ep.Parameters.Count; i < e; ++i)
@@ -93,13 +106,27 @@ internal sealed class MinimalVlTranslator
             var (_, varId) = m.DeclareStorageBuffer(binding, unsigned);
             int irParamIndex = ep.KernelIndexParameterOffset + i;
             paramBinding[irParamIndex] = (varId, unsigned, binding);
+            varIdToBinding[varId] = binding;
+            bindingToVarId[binding] = varId;
             bindings.Add(new VLCompiledKernel.BindingInfo(i, binding));
             bindingElemSize[binding] = GetElementSizeBytes(pt);
             binding++;
         }
-        // Declare push constants for view lengths, in same order
-        if (binding > 0)
-            m.DeclarePushConstants(binding);
+        // Map scalar int parameters to subsequent push-constant slots
+        uint scalarCount = 0;
+        for (int i = 0, e = ep.Parameters.Count; i < e; ++i)
+        {
+            var pt = ep.Parameters[i];
+            if (pt == typeof(int))
+            {
+                int irParamIndex = ep.KernelIndexParameterOffset + i;
+                scalarPcIndex[irParamIndex] = binding + scalarCount;
+                scalarCount++;
+            }
+        }
+        totalPcCount = checked((int)(binding + scalarCount));
+        if (totalPcCount > 0)
+            m.DeclarePushConstants((uint)totalPcCount);
 
         foreach (var block in method.Blocks)
         {
@@ -107,6 +134,7 @@ internal sealed class MinimalVlTranslator
             if (selectionMergeStack.Count > 0 && ReferenceEquals(selectionMergeStack.Peek(), block))
                 selectionMergeStack.Pop();
             m.BeginBlock(block);
+            currentBlock = block;
             var visitor = new Visitor(this);
             foreach (var entry in block)
                 ((Value)entry).Accept(visitor);
@@ -115,7 +143,65 @@ internal sealed class MinimalVlTranslator
         }
     }
 
+    private BasicBlock currentBlock = default!;
+
+    private static ReadOnlySpan<BasicBlock> GetSuccessors(BasicBlock b)
+    {
+        if (b.Terminator is ILGPU.IR.Values.TerminatorValue t && t.NumTargets > 0)
+        {
+            return t.Targets;
+        }
+        return ReadOnlySpan<BasicBlock>.Empty;
+    }
+
+    private void BuildLoopInfo(Method method)
+    {
+        if (dom is null || postDom is null)
+            return;
+        foreach (var block in method.Blocks)
+        {
+            foreach (var succ in GetSuccessors(block))
+            {
+                // Back-edge: succ dominates block
+                var idom = dom.GetImmediateCommonDominator(block, succ);
+                if (ReferenceEquals(idom, succ))
+                {
+                    // Header is succ, latch is block
+                    var header = succ;
+                    var latch = block;
+                    // Heuristic merge: post-dominator of header
+                    var merge = postDom.GetImmediateCommonDominator(header, header);
+                    // If no separate continue chosen, use latch
+                    var cont = latch;
+                    if (!loopInfo.ContainsKey(header))
+                        loopInfo[header] = (merge, cont);
+                }
+            }
+        }
+    }
+
     // Generic helpers for view lowering
+    private static Value UnwrapViewShells(Value v)
+    {
+        while (true)
+        {
+            switch (v.ValueKind)
+            {
+                case ValueKind.ViewCast:
+                    v = ((ViewCast)v).Value.Resolve(); continue;
+                case ValueKind.AddressSpaceCast:
+                    v = ((AddressSpaceCast)v).Value.Resolve(); continue;
+                case ValueKind.AlignTo:
+                    v = ((AlignTo)v).Source.Resolve(); continue;
+                case ValueKind.AsAligned:
+                    v = ((AsAligned)v).Source.Resolve(); continue;
+                case ValueKind.Convert:
+                    v = ((ConvertValue)v).Value.Resolve(); continue;
+                default:
+                    return v;
+            }
+        }
+    }
     private static int GetElementSizeBytes(Type viewType)
     {
         // Extract element type argument from ArrayView<>, ArrayView{1D,2D,3D}
@@ -167,6 +253,12 @@ internal sealed class MinimalVlTranslator
         public uint ByteId;     // 32-bit signed byte offset
         public int ElemSize;    // element size in bytes
         public bool Unsigned;
+        public bool IsByteAddressed; // true if view was built from a raw pointer (NewView)
+    }
+
+    private void TraceViewExpr(string tag, Value chain, in ViewExpr ve, uint? pcSlot = null)
+    {
+        VLTrace.Log($"{tag}: chain={DescribeValue(chain)}, varId={ve.VarId}, binding={ve.Binding}, pcSlot={(pcSlot.HasValue ? pcSlot.Value.ToString() : "-")}, elemSize={ve.ElemSize}, unsigned={ve.Unsigned}, byteAddr={ve.IsByteAddressed}, byteId={ve.ByteId}");
     }
 
     // Build a byte-offset-based pointer for NewView pointers
@@ -177,6 +269,8 @@ internal sealed class MinimalVlTranslator
         {
             switch (v.ValueKind)
             {
+                case ValueKind.GetField:
+                    v = ((GetField)v).ObjectValue.Resolve(); continue;
                 case ValueKind.ViewCast:
                     v = ((ViewCast)v).Value.Resolve(); continue;
                 case ValueKind.AddressSpaceCast:
@@ -193,10 +287,38 @@ internal sealed class MinimalVlTranslator
                     v = ((PointerCast)v).Value.Resolve(); continue;
                 case ValueKind.IntAsPointerCast:
                     v = ((IntAsPointerCast)v).Value.Resolve(); continue;
+                case ValueKind.Convert:
+                    v = ((ConvertValue)v).Value.Resolve(); continue;
                 default:
                     break;
             }
             break;
+        }
+        // Combine pointer arithmetic: (ptr +/- int)
+        if (v is BinaryArithmeticValue bin &&
+            (bin.Kind == BinaryArithmeticKind.Add || bin.Kind == BinaryArithmeticKind.Sub))
+        {
+            var l = bin.Left.Resolve();
+            var r = bin.Right.Resolve();
+            // Try left as pointer
+            if (TryBuildPtrExpr(l, out var b0, out var baseBytes))
+            {
+                var addend = GetOrBuild(r);
+                var total = bin.Kind == BinaryArithmeticKind.Add
+                    ? m.EmitAdd(baseBytes, addend, unsigned: false)
+                    : m.EmitSub(baseBytes, addend, unsigned: false);
+                binding = b0; byteId = total; return true;
+            }
+            // Try right as pointer
+            if (TryBuildPtrExpr(r, out var b1, out var baseBytes1))
+            {
+                var addend = GetOrBuild(l);
+                // Note: l (+/-) r — if pointer on right, addition is commutative for Add
+                var total = bin.Kind == BinaryArithmeticKind.Add
+                    ? m.EmitAdd(baseBytes1, addend, unsigned: false)
+                    : m.EmitSub(addend, baseBytes1, unsigned: false);
+                binding = b1; byteId = total; return true;
+            }
         }
         if (v is LoadElementAddress lea)
         {
@@ -219,7 +341,7 @@ internal sealed class MinimalVlTranslator
         {
             if (paramBinding.TryGetValue(p.Index, out var pinf))
             {
-                expr = new ViewExpr { VarId = pinf.varId, Binding = pinf.binding, ByteId = m.EmitConstInt32(0), ElemSize = bindingElemSize.TryGetValue(pinf.binding, out var s0) ? s0 : 4, Unsigned = pinf.unsigned };
+                expr = new ViewExpr { VarId = pinf.varId, Binding = pinf.binding, ByteId = m.EmitConstInt32(0), ElemSize = bindingElemSize.TryGetValue(pinf.binding, out var s0) ? s0 : 4, Unsigned = pinf.unsigned, IsByteAddressed = false };
                 return true;
             }
             // Compute ordinal relative to KernelIndexParameterOffset and derive binding generically
@@ -241,7 +363,7 @@ internal sealed class MinimalVlTranslator
                     if (varId != 0)
                     {
                         int es = bindingElemSize.TryGetValue(bind.Value, out var s1) ? s1 : 4;
-                        expr = new ViewExpr { VarId = varId, Binding = bind.Value, ByteId = m.EmitConstInt32(0), ElemSize = es, Unsigned = u };
+                        expr = new ViewExpr { VarId = varId, Binding = bind.Value, ByteId = m.EmitConstInt32(0), ElemSize = es, Unsigned = u, IsByteAddressed = false };
                         return true;
                     }
                 }
@@ -265,13 +387,15 @@ internal sealed class MinimalVlTranslator
                 return TryBuildViewExpr(((ConvertValue)v).Value.Resolve(), out expr);
             case ValueKind.Structure:
             {
-                bool has = false; ViewExpr found = default;
-                foreach (var n in v.Nodes)
+                // Scan structure nodes to find a unique bound view expr
+                ViewExpr found = default; bool has = false;
+                foreach (var node in v.Nodes)
                 {
-                    if (TryBuildViewExpr(n.Resolve(), out var inner))
+                    var inner = node.Resolve();
+                    if (TryBuildViewExpr(inner, out var sub))
                     {
-                        if (!has) { has = true; found = inner; }
-                        else if (found.Binding != inner.Binding)
+                        if (!has) { found = sub; has = true; }
+                        else if (found.Binding != sub.Binding)
                         { expr = default; return false; }
                     }
                 }
@@ -292,7 +416,17 @@ internal sealed class MinimalVlTranslator
                 var sv = (SubViewValue)v;
                 if (!TryBuildViewExpr(sv.Source.Resolve(), out expr)) return false;
                 var off = GetOrBuild(sv.Offset.Resolve());
-                expr.ByteId = m.EmitAdd(expr.ByteId, off, unsigned: false);
+                // Determine whether 'off' is in bytes or elements
+                uint offBytesId;
+                bool bindingKnown = bindingElemSize.TryGetValue(expr.Binding, out var bindElemSize);
+                bool elementSizeMismatch = bindingKnown && bindElemSize != expr.ElemSize;
+                if (expr.IsByteAddressed || elementSizeMismatch)
+                    offBytesId = off; // treat offset as bytes
+                else
+                    offBytesId = MulByConst(off, expr.ElemSize); // elements -> bytes
+
+                expr.ByteId = m.EmitAdd(expr.ByteId, offBytesId, unsigned: false);
+                VLTrace.Log($"SubView: chain={DescribeValue(v)}, elemSize={expr.ElemSize}, treatOffAsBytes={(expr.IsByteAddressed || elementSizeMismatch)}, byteId={expr.ByteId}");
                 return true;
             }
             case ValueKind.NewView:
@@ -306,7 +440,7 @@ internal sealed class MinimalVlTranslator
                     if (kv.Value.binding == bind) { varId = kv.Value.varId; uns = kv.Value.unsigned; break; }
                 }
                 if (varId == 0) { expr = default; return false; }
-                expr = new ViewExpr { VarId = varId, Binding = bind, ByteId = baseBytes, ElemSize = GetElementSizeBytes(nv.Type), Unsigned = uns };
+                expr = new ViewExpr { VarId = varId, Binding = bind, ByteId = baseBytes, ElemSize = GetElementSizeBytes(nv.Type), Unsigned = uns, IsByteAddressed = true };
                 return true;
             }
         }
@@ -328,12 +462,18 @@ internal sealed class MinimalVlTranslator
                 t.m.EmitBranch(merge);
                 return;
             }
+            // Default branch
             t.m.EmitBranch(value.Target);
         }
         public void Visit(IfBranch value)
         {
             var cond = t.GetOrBuild(value.Condition.Resolve());
             var merge = t.postDom!.GetImmediateCommonDominator(value.TrueTarget, value.FalseTarget);
+            // If this block is a loop header, emit LoopMerge first
+            if (t.loopInfo.TryGetValue(t.currentBlock, out var li))
+            {
+                t.m.EmitLoopMerge(li.Merge, li.Continue);
+            }
             t.m.EmitSelectionMerge(merge);
             // Enter selection scope until we reach merge label
             t.selectionMergeStack.Push(merge);
@@ -362,16 +502,36 @@ internal sealed class MinimalVlTranslator
                 incoming[i] = (srcs[i], idv);
             }
             var id = t.m.EmitPhi(value.PhiType, incoming);
+            // Trace phi incoming ids for debugging merges
+            VLTrace.Log($"Phi: {value} incoming=[" + string.Join(",", System.Linq.Enumerable.Select(incoming, p => p.Item2.ToString())) + $"] -> {id}");
             t.m.SetOrigin(id, t.ep.MethodInfo.Name, nameof(PhiValue), value.ToString());
             t.idMap[value] = id;
+        }
+        public void Visit(Store value)
+        {
+            var ptr = t.GetOrBuild(value.Target.Resolve());
+            var val = t.GetOrBuild(value.Value.Resolve());
+            t.m.EmitStore(ptr, val);
+            VLTrace.Log($"Store: ptr={ptr} val={val} targetChain={DescribeValue(value.Target.Resolve())}");
         }
         public void Visit(ReturnTerminator value) => t.m.EmitReturn();
         public void Visit(CompareValue value)
         {
             Ensure32Bit(value.Left.Resolve());
             Ensure32Bit(value.Right.Resolve());
-            var l = t.GetOrBuild(value.Left.Resolve());
-            var r = t.GetOrBuild(value.Right.Resolve());
+            var lval = value.Left.Resolve();
+            var rval = value.Right.Resolve();
+            VLTrace.Log($"CompareValue: L={DescribeValue(lval)} R={DescribeValue(rval)}");
+            uint l;
+            if (t.TryResolveViewBinding(lval, out var lInfo))
+                l = t.m.EmitLoadViewLength(lInfo.binding);
+            else
+                l = t.GetOrBuild(lval);
+            uint r;
+            if (t.TryResolveViewBinding(rval, out var rInfo))
+                r = t.m.EmitLoadViewLength(rInfo.binding);
+            else
+                r = t.GetOrBuild(rval);
             bool u = (value.Flags & CompareFlags.UnsignedOrUnordered) == CompareFlags.UnsignedOrUnordered;
             // Normalize both operands to the same signedness using bitcasts
             var lN = t.m.EmitIntBitcast(l, toUnsigned: u);
@@ -420,7 +580,92 @@ internal sealed class MinimalVlTranslator
             t.m.SetOrigin(resId, t.ep.MethodInfo.Name, nameof(ConvertValue), value.ToString());
             t.idMap[value] = resId;
         }
-        public void Visit(GetField value){ var dim = value.FieldSpan.Index switch {1=>DeviceConstantDimension3D.Y,2=>DeviceConstantDimension3D.Z,_=>DeviceConstantDimension3D.X}; var id=t.m.EmitLoadGlobalIndex(dim); t.m.SetOrigin(id, t.ep.MethodInfo.Name, nameof(GetField), value.ToString()); t.idMap[value]=id; }
+        public void Visit(GetField value)
+        {
+            var obj = value.ObjectValue.Resolve();
+            // Kernel index struct fields -> global id component
+            if (obj is Parameter pIdx && pIdx.Index == 0)
+            {
+                var dim = value.FieldSpan.Index switch
+                {
+                    0 => DeviceConstantDimension3D.X,
+                    1 => DeviceConstantDimension3D.Y,
+                    2 => DeviceConstantDimension3D.Z,
+                    _ => throw new NotImplementedException(
+                        $"GetField: unexpected kernel index field index={value.FieldSpan.Index}")
+                };
+                var id = t.m.EmitLoadGlobalIndex(dim);
+                t.m.SetOrigin(id, t.ep.MethodInfo.Name, nameof(GetField), value.ToString());
+                t.idMap[value] = id;
+                return;
+            }
+
+            // View parameter struct fields (e.g., Length)
+            if (obj is Parameter p)
+            {
+                // Determine descriptor binding for this parameter
+                uint binding;
+                if (t.paramBinding.TryGetValue(p.Index, out var pinf))
+                {
+                    binding = pinf.binding;
+                }
+                else
+                {
+                    int ord = p.Index - t.ep.KernelIndexParameterOffset;
+                    if (ord >= 0 && ord < t.ep.Parameters.Count && IsAnyArrayViewType(t.ep.Parameters[ord]))
+                    {
+                        uint? found = null;
+                        foreach (var b in t.bindings)
+                            if (b.ParamIndex == ord) { found = b.Binding; break; }
+                        if (!found.HasValue)
+                            throw new NotImplementedException($"GetField: could not resolve binding for view parameter at IR index {p.Index}");
+                        binding = found.Value;
+                    }
+                    else
+                    {
+                        // Not a view parameter -> ignore here
+                        VLTrace.Log($"GetField ignored (non-index, non-view): chain={DescribeValue(value)}");
+                        return;
+                    }
+                }
+
+                // FieldSpan.Index 1 corresponds to Length (observed layout: View [0], Int64 Length [1], Int8 flags [2])
+                if (value.FieldSpan.Index == 1)
+                {
+                    var lenId = t.m.EmitLoadViewLength(binding);
+                    t.m.SetOrigin(lenId, t.ep.MethodInfo.Name, nameof(GetField), value.ToString());
+                    t.idMap[value] = lenId;
+                    VLTrace.Log($"GetField Length -> pcSlot={binding} id={lenId}");
+                    return;
+                }
+
+                // For non-length fields, forward to underlying object (no-op)
+                var fwd = t.GetOrBuild(obj);
+                t.idMap[value] = fwd;
+                VLTrace.Log($"GetField forwarded (view struct field {value.FieldSpan.Index}): chain={DescribeValue(value)} -> {fwd}");
+                return;
+            }
+
+            // Non-parameter object: try to resolve a bound view chain
+            if (t.TryResolveViewBinding(obj, out var info2))
+            {
+                if (value.FieldSpan.Index == 1)
+                {
+                    var lenId2 = t.m.EmitLoadViewLength(info2.binding);
+                    t.m.SetOrigin(lenId2, t.ep.MethodInfo.Name, nameof(GetField), value.ToString());
+                    t.idMap[value] = lenId2;
+                    VLTrace.Log($"GetField Length (resolved from structure) -> pcSlot={info2.binding} id={lenId2}");
+                    return;
+                }
+                var fwd2 = info2.varId;
+                t.idMap[value] = fwd2;
+                VLTrace.Log($"GetField forwarded (resolved struct field {value.FieldSpan.Index}) -> {fwd2}");
+                return;
+            }
+
+            // Otherwise ignore; wrappers will be handled when used
+            VLTrace.Log($"GetField ignored (non-index): chain={DescribeValue(value)}");
+        }
         public void Visit(GridIndexValue value){ var id=t.m.EmitLoadGlobalIndex(value.Dimension); t.m.SetOrigin(id, t.ep.MethodInfo.Name, nameof(GridIndexValue), value.ToString()); t.idMap[value]=id; }
         public void Visit(LoadElementAddress value)
         {
@@ -467,25 +712,65 @@ internal sealed class MinimalVlTranslator
         public void Visit(GetViewLength value)
         {
             var vv = value.View.Resolve();
+            var uw = UnwrapViewShells(vv);
+            // Prefer IR-provided lengths for shells
+            if (uw is SubViewValue sv)
+            {
+                // Compute implicit subview length explicitly: baseLen - offsetElems
+                if (!t.TryBuildViewExpr(sv.Source.Resolve(), out var baseVe))
+                    throw new NotImplementedException($"GetViewLength(SubView): cannot build base view expr; chain={DescribeValue(vv)}");
+                uint pcSlot = t.varIdToBinding.TryGetValue(baseVe.VarId, out var bSlot0) ? bSlot0 : baseVe.Binding;
+                var baseLen_sv = t.m.EmitLoadViewLength(pcSlot);
+                // SubView(ArrayView,int) offset is in elements for ArrayView-based chains
+                var offElems = t.GetOrBuild(sv.Offset.Resolve());
+                var baseLenS_sv = t.m.EmitIntBitcast(baseLen_sv, toUnsigned: false);
+                var lenId = t.m.EmitSub(baseLenS_sv, offElems, unsigned: false);
+                t.m.SetOrigin(lenId, t.ep.MethodInfo.Name, nameof(GetViewLength), value.ToString());
+                VLTrace.Log($"GetViewLength: subview implicit chain={DescribeValue(vv)} pcSlot={pcSlot}");
+                t.idMap[value] = lenId; return;
+            }
+            if (uw is NewView nv)
+            {
+                var lenId = t.GetOrBuild(nv.Length.Resolve());
+                t.m.SetOrigin(lenId, t.ep.MethodInfo.Name, nameof(GetViewLength), value.ToString());
+                VLTrace.Log($"GetViewLength: newview-length chain={DescribeValue(vv)} -> id={lenId}");
+                t.idMap[value] = lenId; return;
+            }
             // Generic path: compute base length from binding and subtract consumed elements from byte offset
             if (!t.TryBuildViewExpr(vv, out var ve))
                 throw new NotImplementedException($"GetViewLength: cannot build view expr; chain={DescribeValue(vv)}");
-            var baseLen = t.m.EmitLoadViewLength(ve.Binding);
+            // Load base length from the correct PC slot based on the buffer varId
+            uint bindPc = t.varIdToBinding.TryGetValue(ve.VarId, out var bSlot) ? bSlot : ve.Binding;
+            var baseLen = t.m.EmitLoadViewLength(bindPc);
+            t.TraceViewExpr("GetViewLength.generic", vv, ve, bindPc);
             // subElems = byteOffset / elemSize (use shifts for power-of-two sizes)
-            uint subElems = t.m.EmitConstInt32(0);
-            if (ve.ByteId != t.m.EmitConstInt32(0))
+            int shift = ve.ElemSize switch { 8 => 3, 4 => 2, 2 => 1, 1 => 0, _ => 2 };
+            uint subElems;
+            if (shift == 0)
             {
-                int shift = ve.ElemSize switch { 8 => 3, 4 => 2, 2 => 1, 1 => 0, _ => 2 };
-                if (shift > 0)
-                {
-                    var offU = t.m.EmitIntBitcast(ve.ByteId, toUnsigned: true);
-                    var sh2 = t.m.EmitConstInt32(shift);
-                    var sh2U = t.m.EmitIntBitcast(sh2, toUnsigned: true);
-                    var elemsU = t.m.EmitShiftRight(offU, sh2U, unsigned: true);
-                    subElems = t.m.EmitIntBitcast(elemsU, toUnsigned: false);
-                }
+                subElems = ve.ByteId; // 1-byte elements
+            }
+            else
+            {
+                var offU = t.m.EmitIntBitcast(ve.ByteId, toUnsigned: true);
+                var sh2 = t.m.EmitConstInt32(shift);
+                var sh2U = t.m.EmitIntBitcast(sh2, toUnsigned: true);
+                var elemsU = t.m.EmitShiftRight(offU, sh2U, unsigned: true);
+                subElems = t.m.EmitIntBitcast(elemsU, toUnsigned: false);
             }
             var baseLenS = t.m.EmitIntBitcast(baseLen, toUnsigned: false);
+            // Scale base length if binding element size differs from current element size
+            if (t.bindingElemSize.TryGetValue(ve.Binding, out var bindElemSize) && bindElemSize != ve.ElemSize)
+            {
+                // effectiveLen = baseLen * bindElemSize / ve.ElemSize
+                // Currently, only handle simple power-of-two and exact multiples by multiplying when scale > 1.
+                int scale = bindElemSize / Math.Max(1, ve.ElemSize);
+                if (scale > 1)
+                {
+                    var cScale = t.m.EmitConstInt32(scale);
+                    baseLenS = t.m.EmitMul(baseLenS, cScale, unsigned: false);
+                }
+            }
             var len = t.m.EmitSub(baseLenS, subElems, unsigned: false);
             t.m.SetOrigin(len, t.ep.MethodInfo.Name, nameof(GetViewLength), value.ToString());
             t.idMap[value] = len;
@@ -529,7 +814,7 @@ internal sealed class MinimalVlTranslator
             t.m.SetOrigin(rid, t.ep.MethodInfo.Name, nameof(BinaryArithmeticValue), value.ToString());
             t.idMap[value] = rid;
         }
-        public void Visit(Store value){ t.m.EmitStore(t.GetOrBuild(value.Target.Resolve()), t.GetOrBuild(value.Value.Resolve())); }
+        // (removed duplicate Visit(Store); consolidated earlier detailed implementation is used)
         public void Visit(PrimitiveValue value){ var id=t.GetOrBuild(value); t.idMap[value]=id; }
         public void Visit(StringValue value){ /* ignore */ }
         public void Visit(AddressSpaceCast value)
@@ -566,10 +851,22 @@ internal sealed class MinimalVlTranslator
         public void Visit(MethodCall value) { throw new NotImplementedException("Method calls not supported"); }
         public void Visit(UnaryArithmeticValue value) { throw new NotImplementedException(); }
         public void Visit(TernaryArithmeticValue value) { throw new NotImplementedException(); }
-        public void Visit(IntAsPointerCast value) { throw new NotImplementedException(); }
-        public void Visit(PointerAsIntCast value) { throw new NotImplementedException(); }
-        public void Visit(PointerCast value) { throw new NotImplementedException(); }
-        public void Visit(ArrayToViewCast value) { throw new NotImplementedException(); }
+        public void Visit(IntAsPointerCast value)
+        {
+            var id = t.GetOrBuild(value.Value.Resolve());
+            t.idMap[value] = id;
+        }
+        public void Visit(PointerAsIntCast value) { /* not used in this path */ }
+        public void Visit(PointerCast value)
+        {
+            var id = t.GetOrBuild(value.Value.Resolve());
+            t.idMap[value] = id;
+        }
+        public void Visit(ArrayToViewCast value)
+        {
+            var id = t.GetOrBuild(value.Value.Resolve());
+            t.idMap[value] = id;
+        }
         public void Visit(FloatAsIntCast value) { throw new NotImplementedException(); }
         public void Visit(IntAsFloatCast value) { throw new NotImplementedException(); }
         public void Visit(Predicate value) { throw new NotImplementedException(); }
@@ -577,14 +874,52 @@ internal sealed class MinimalVlTranslator
         public void Visit(MemoryBarrier value) { }
         public void Visit(SubViewValue value) { /* shell view: handled by LEA/GetViewLength */ }
         public void Visit(LoadArrayElementAddress value) { throw new NotImplementedException(); }
-        public void Visit(LoadFieldAddress value) { throw new NotImplementedException(); }
+        public void Visit(LoadFieldAddress value)
+        {
+            var id = t.GetOrBuild(value.Source.Resolve());
+            t.idMap[value] = id;
+        }
         public void Visit(NewView value) { }
-        public void Visit(AlignTo value) { throw new NotImplementedException(); }
-        public void Visit(AsAligned value) { throw new NotImplementedException(); }
+        public void Visit(AlignTo value)
+        {
+            var id = t.GetOrBuild(value.Source.Resolve());
+            t.idMap[value] = id;
+        }
+        public void Visit(AsAligned value)
+        {
+            var id = t.GetOrBuild(value.Source.Resolve());
+            t.idMap[value] = id;
+        }
         public void Visit(NewArray value) { throw new NotImplementedException(); }
         public void Visit(GetArrayLength value) { throw new NotImplementedException(); }
         public void Visit(NullValue value) { }
-        public void Visit(StructureValue value) { throw new NotImplementedException(); }
+        public void Visit(StructureValue value)
+        {
+            // Map structure view wrappers to their underlying storage buffer var id
+            var v = (Value)value;
+            if (t.TryResolveViewBinding(v, out var info))
+            {
+                t.idMap[value] = info.varId;
+                VLTrace.Log($"StructureValue mapped to varId={info.varId} binding={info.binding}");
+                return;
+            }
+            // Heuristic: attempt to extract binding from nested graph
+            if (t.TryExtractBindingFromGraph(v, 0, out var binding))
+            {
+                // Ensure we have a var id for this binding
+                if (!t.bindingToVarId.TryGetValue(binding, out var varId))
+                {
+                    var declared = t.m.DeclareStorageBuffer(binding, unsigned: false);
+                    varId = declared.varId;
+                    t.bindingToVarId[binding] = varId;
+                    t.varIdToBinding[varId] = binding;
+                }
+                t.idMap[value] = varId;
+                VLTrace.Log($"StructureValue mapped via graph to varId={varId} binding={binding}");
+                return;
+            }
+            throw new NotImplementedException($"StructureValue could not be resolved to a view binding; chain={DescribeValue(value)}");
+        }
         public void Visit(SetField value) { throw new NotImplementedException(); }
         public void Visit(AcceleratorTypeValue value) { throw new NotImplementedException(); }
         public void Visit(UndefinedValue value) { throw new NotImplementedException(); }
@@ -628,6 +963,15 @@ internal sealed class MinimalVlTranslator
             case ValueKind.ViewCast:
                 VLTrace.Log("TryResolveViewBinding: unwrap ViewCast.Value");
                 return TryResolveViewBinding(((ViewCast)v).Value.Resolve(), out info);
+            case ValueKind.PointerCast:
+                VLTrace.Log("TryResolveViewBinding: unwrap PointerCast.Value");
+                return TryResolveViewBinding(((PointerCast)v).Value.Resolve(), out info);
+            case ValueKind.IntAsPointerCast:
+                VLTrace.Log("TryResolveViewBinding: unwrap IntAsPointerCast.Value");
+                return TryResolveViewBinding(((IntAsPointerCast)v).Value.Resolve(), out info);
+            case ValueKind.Convert:
+                VLTrace.Log("TryResolveViewBinding: unwrap Convert.Value");
+                return TryResolveViewBinding(((ConvertValue)v).Value.Resolve(), out info);
             case ValueKind.SubView:
                 VLTrace.Log("TryResolveViewBinding: unwrap SubView.Source");
                 return TryResolveViewBinding(((SubViewValue)v).Source.Resolve(), out info);
@@ -651,11 +995,41 @@ internal sealed class MinimalVlTranslator
                         }
                     }
                 }
-                if (has) { info = found; return true; }
+                if (has) { info = found; VLTrace.Log($"TryResolveViewBinding: Structure success binding={found.binding} varId={found.varId}"); return true; }
                 info = default; VLTrace.Log("TryResolveViewBinding: Structure had no bound sub-nodes"); return false;
             }
         }
         info = default; VLTrace.Log($"TryResolveViewBinding: failed for kind={v.ValueKind}"); return false;
+    }
+
+    private bool TryExtractBindingFromGraph(Value v, int depth, out uint binding)
+    {
+        if (depth > 8) { binding = 0; return false; }
+        if (v is Parameter p && paramBinding.TryGetValue(p.Index, out var pinf))
+        { binding = pinf.binding; return true; }
+        foreach (var node in v.Nodes)
+        {
+            var inner = node.Resolve();
+            if (TryExtractBindingFromGraph(inner, depth + 1, out binding))
+                return true;
+        }
+        // Unwrap common shells
+        switch (v.ValueKind)
+        {
+            case ValueKind.GetField: return TryExtractBindingFromGraph(((GetField)v).ObjectValue.Resolve(), depth + 1, out binding);
+            case ValueKind.LoadFieldAddress: return TryExtractBindingFromGraph(((LoadFieldAddress)v).Source.Resolve(), depth + 1, out binding);
+            case ValueKind.NewView: return TryExtractBindingFromGraph(((NewView)v).Pointer.Resolve(), depth + 1, out binding);
+            case ValueKind.AddressSpaceCast: return TryExtractBindingFromGraph(((AddressSpaceCast)v).Value.Resolve(), depth + 1, out binding);
+            case ValueKind.ArrayToViewCast: return TryExtractBindingFromGraph(((ArrayToViewCast)v).Value.Resolve(), depth + 1, out binding);
+            case ValueKind.ViewCast: return TryExtractBindingFromGraph(((ViewCast)v).Value.Resolve(), depth + 1, out binding);
+            case ValueKind.Convert: return TryExtractBindingFromGraph(((ConvertValue)v).Value.Resolve(), depth + 1, out binding);
+            case ValueKind.AlignTo: return TryExtractBindingFromGraph(((AlignTo)v).Source.Resolve(), depth + 1, out binding);
+            case ValueKind.AsAligned: return TryExtractBindingFromGraph(((AsAligned)v).Source.Resolve(), depth + 1, out binding);
+            case ValueKind.PointerCast: return TryExtractBindingFromGraph(((PointerCast)v).Value.Resolve(), depth + 1, out binding);
+            case ValueKind.IntAsPointerCast: return TryExtractBindingFromGraph(((IntAsPointerCast)v).Value.Resolve(), depth + 1, out binding);
+            case ValueKind.SubView: return TryExtractBindingFromGraph(((SubViewValue)v).Source.Resolve(), depth + 1, out binding);
+        }
+        binding = 0; return false;
     }
     private uint GetOrBuild(Value v)
     {
@@ -663,6 +1037,51 @@ internal sealed class MinimalVlTranslator
             return id;
         switch (v.ValueKind)
         {
+            case ValueKind.Structure:
+            {
+                if (TryResolveViewBinding(v, out var info))
+                {
+                    idMap[v] = info.varId;
+                    return info.varId;
+                }
+                if (TryExtractBindingFromGraph(v, 0, out var b))
+                {
+                    if (!bindingToVarId.TryGetValue(b, out var varId))
+                    {
+                        var dec = m.DeclareStorageBuffer(b, unsigned: false);
+                        varId = dec.varId;
+                        bindingToVarId[b] = varId;
+                        varIdToBinding[varId] = b;
+                    }
+                    idMap[v] = varId;
+                    return varId;
+                }
+                throw new NotImplementedException($"Structure cannot be resolved to a bound view; chain={DescribeValue(v)}");
+            }
+            case ValueKind.Parameter:
+            {
+                var paramV = (Parameter)v;
+                if (paramBinding.TryGetValue(paramV.Index, out var pinf))
+                    return idMap[v] = pinf.varId;
+                int pj = paramV.Index - ep.KernelIndexParameterOffset;
+                if (pj >= 0 && pj < ep.Parameters.Count && IsAnyArrayViewType(ep.Parameters[pj]))
+                {
+                    foreach (var b in bindings)
+                    {
+                        if (b.ParamIndex == pj)
+                        {
+                            if (bindingToVarId.TryGetValue(b.Binding, out var varId))
+                                return idMap[v] = varId;
+                            var redeclared = m.DeclareStorageBuffer((uint)b.Binding, unsigned: false);
+                            varId = redeclared.varId;
+                            bindingToVarId[(uint)b.Binding] = varId;
+                            return idMap[v] = varId;
+                        }
+                    }
+                }
+                // Not a view parameter; fallthrough to later scalar-parameter mapping
+                break;
+            }
             case ValueKind.AddressSpaceCast:
             {
                 var asc = (AddressSpaceCast)v;
@@ -712,8 +1131,29 @@ internal sealed class MinimalVlTranslator
             case ValueKind.Compare:
             {
                 var cmp = (CompareValue)v;
-                var left = GetOrBuild(cmp.Left.Resolve());
-                var right = GetOrBuild(cmp.Right.Resolve());
+                var lval = cmp.Left.Resolve();
+                var rval = cmp.Right.Resolve();
+                VLTrace.Log($"GOB Compare: L.kind={lval.ValueKind} R.kind={rval.ValueKind} L={DescribeValue(lval)} R={DescribeValue(rval)}");
+                uint left;
+                if (TryResolveViewBinding(lval, out var lInfo))
+                {
+                    VLTrace.Log($"GOB Compare: L resolved binding={lInfo.binding}");
+                    left = m.EmitLoadViewLength(lInfo.binding);
+                }
+                else
+                {
+                    left = GetOrBuild(lval);
+                }
+                uint right;
+                if (TryResolveViewBinding(rval, out var rInfo))
+                {
+                    VLTrace.Log($"GOB Compare: R resolved binding={rInfo.binding}");
+                    right = m.EmitLoadViewLength(rInfo.binding);
+                }
+                else
+                {
+                    right = GetOrBuild(rval);
+                }
                 var unsigned = (cmp.Flags & CompareFlags.UnsignedOrUnordered) == CompareFlags.UnsignedOrUnordered;
                 var rid = m.EmitCompareInt(left, right, cmp.Kind, unsigned);
                 idMap[v] = rid;
@@ -755,31 +1195,9 @@ internal sealed class MinimalVlTranslator
             case ValueKind.GetField:
             {
                 var gf = (GetField)v;
-                var objParam = gf.ObjectValue.ResolveAs<Parameter>();
-                if (objParam != null && objParam.Index == 0)
-                {
-                    var dim = gf.FieldSpan.Index switch
-                    {
-                        1 => DeviceConstantDimension3D.Y,
-                        2 => DeviceConstantDimension3D.Z,
-                        _ => DeviceConstantDimension3D.X,
-                    };
-                    var gid = m.EmitLoadGlobalIndex(dim);
-                    idMap[v] = gid;
-                    return gid;
-                }
-                // Fallback: treat as grid-index-like access
-                {
-                    var dim = gf.FieldSpan.Index switch
-                    {
-                        1 => DeviceConstantDimension3D.Y,
-                        2 => DeviceConstantDimension3D.Z,
-                        _ => DeviceConstantDimension3D.X,
-                    };
-                    var gid = m.EmitLoadGlobalIndex(dim);
-                    idMap[v] = gid;
-                    return gid;
-                }
+                var obj = gf.ObjectValue.Resolve();
+                // Defer to underlying object to support structural wrappers around views
+                return GetOrBuild(obj);
             }
             case ValueKind.Alloca:
             {
@@ -833,10 +1251,64 @@ internal sealed class MinimalVlTranslator
                 idMap[v] = totalS32;
                 return totalS32;
             }
+            // Map view parameters to their storage buffer variable id
+            if (paramBinding.TryGetValue(p.Index, out var pinf))
+            {
+                idMap[v] = pinf.varId;
+                return pinf.varId;
+            }
+            // Generic mapping for view parameters if not yet in paramBinding
+            int pj = p.Index - ep.KernelIndexParameterOffset;
+            if (pj >= 0 && pj < ep.Parameters.Count && IsAnyArrayViewType(ep.Parameters[pj]))
+            {
+                // Find binding by ordinal pj
+                foreach (var b in bindings)
+                {
+                    if (b.ParamIndex == pj)
+                    {
+                        if (bindingToVarId.TryGetValue(b.Binding, out var varId))
+                        {
+                            idMap[v] = varId;
+                            return varId;
+                        }
+                        // Should not happen: storage var must exist
+                        var redeclared = m.DeclareStorageBuffer((uint)b.Binding, unsigned: false);
+                        varId = redeclared.varId;
+                        bindingToVarId[(uint)b.Binding] = varId;
+                        idMap[v] = varId;
+                        return varId;
+                    }
+                }
+            }
+            // Scalar ints mapped to push constants after view lengths
+            if (scalarPcIndex.TryGetValue(p.Index, out var slot))
+            {
+                var val = m.EmitLoadViewLength(slot);
+                idMap[v] = val;
+                return val;
+            }
         }
-        // Fallback: try existing mapping or fail with detailed chain for diagnostics
-        throw new NotImplementedException($"Unsupported value kind: {v}; chain={DescribeValue(v)}");
+        // Fallback: last-chance diagnostics
+        VLTrace.Log($"GetOrBuild fallback: kind={v.ValueKind} chain={DescribeValue(v)} v={v}");
+        // Last-chance: if this value resolves to a bound view, assume a length request
+        if (TryResolveViewBinding(v, out var fbInfo))
+        {
+            var lenId = m.EmitLoadViewLength(fbInfo.binding);
+            VLTrace.Log($"GetOrBuild fallback resolved as length: binding={fbInfo.binding} -> id={lenId}");
+            return idMap[v] = lenId;
+        }
+        // Try heuristic graph walk to extract a binding from nested shells/structs
+        if (TryExtractBindingFromGraph(v, 0, out var fbBinding))
+        {
+            var lenId2 = m.EmitLoadViewLength(fbBinding);
+            VLTrace.Log($"GetOrBuild fallback(graph) resolved as length: binding={fbBinding} -> id={lenId2}");
+            return idMap[v] = lenId2;
+        }
+        VLTrace.Log($"GetOrBuild THROW: kind={v.ValueKind} chain={DescribeValue(v)} v={v}");
+        throw new NotImplementedException($"Unsupported value kind: {v} kind={v.ValueKind}; chain={DescribeValue(v)}");
     }
     public VLCompiledKernel.BindingInfo[] GetBindings() => bindings.ToArray();
-    public int GetPushConstantCount() => bindings.Count; // one int per view length
+    public int GetPushConstantCount() => totalPcCount;
 }
+
+
