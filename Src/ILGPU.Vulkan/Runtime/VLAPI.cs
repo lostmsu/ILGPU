@@ -8,6 +8,7 @@
 
 using ILGPU;
 using ILGPU.Runtime;
+using ILGPU.Backends.Vulkan;
 using System;
 using Silk.NET.Vulkan;
 
@@ -16,7 +17,7 @@ namespace ILGPU.Runtime.Vulkan;
 internal static class VLAPI
 {
     // Builds buffer descriptor info for a given view
-    private static unsafe DescriptorBufferInfo GetBufferInfo<T>(ArrayView<T> view)
+    internal static unsafe DescriptorBufferInfo GetBufferInfo<T>(ArrayView<T> view)
         where T : unmanaged
     {
         var buf = (VLMemoryBuffer)((IArrayView)view).Buffer;
@@ -135,63 +136,71 @@ internal static class VLAPI
         return dset;
     }
 
-    // 1 view
-    internal static unsafe void LaunchKernelWithStreamBinding<T>(
+    internal static unsafe void Launch(
         VLStream stream,
         VLKernel kernel,
         RuntimeKernelConfig config,
-        ArrayView<T> a)
-        where T : unmanaged
-    {
-        var acc = (VLAccelerator)stream.Accelerator;
-        var vk = acc.Vk;
-        var dev = acc.LogicalDevice;
-
-        kernel.EnsurePipeline();
-
-        var info = stackalloc DescriptorBufferInfo[1];
-        info[0] = GetBufferInfo(a);
-        var dset = AllocateAndWrite(vk, dev, kernel.DescriptorSetLayout, info, 1, out var pool);
-        try
-        {
-            var vals = stackalloc int[1];
-            vals[0] = (int)a.Length;
-            BindAndDispatch(vk, dev, stream, kernel, dset, config, vals, 1u);
-        }
-        finally
-        {
-            vk.DestroyDescriptorPool(dev, pool, null);
-        }
-    }
-
-    // 2 views
-    internal static unsafe void LaunchKernelWithStreamBinding<T>(
-        VLStream stream,
-        VLKernel kernel,
-        RuntimeKernelConfig config,
-        ArrayView<T> a,
-        ArrayView<T> b)
-        where T : unmanaged
+        IArrayView[] views,
+        int[] scalars)
     {
         var acc = (VLAccelerator)stream.Accelerator;
         var vk = acc.Vk;
         var dev = acc.LogicalDevice;
         kernel.EnsurePipeline();
 
-        var info = stackalloc DescriptorBufferInfo[2];
-        info[0] = GetBufferInfo(a);
-        info[1] = GetBufferInfo(b);
-        var dset = AllocateAndWrite(vk, dev, kernel.DescriptorSetLayout, info, 2, out var pool);
-        try
+        // Build descriptors and push constants
+        var count = views?.Length ?? 0;
+        var infos = new DescriptorBufferInfo[count];
+        var pc = new int[count + (scalars?.Length ?? 0)];
+        for (int i = 0; i < count; i++)
         {
-            var vals = stackalloc int[2];
-            vals[0] = (int)a.Length;
-            vals[1] = (int)b.Length;
-            BindAndDispatch(vk, dev, stream, kernel, dset, config, vals, 2u);
+            var v = views[i];
+            var mem = v.Buffer;
+            var buf = (VLMemoryBuffer)mem;
+            long indexInBytes = 0;
+            if (v is IContiguousArrayView cav)
+            {
+                indexInBytes = cav.IndexInBytes;
+            }
+            else
+            {
+                // Try to resolve BaseView to fetch a contiguous origin
+                var t = v.GetType();
+                var baseViewProp = t.GetProperty("BaseView");
+                if (baseViewProp != null)
+                {
+                    var baseViewObj = baseViewProp.GetValue(v);
+                    if (baseViewObj is IContiguousArrayView baseCav)
+                        indexInBytes = baseCav.IndexInBytes;
+                }
+            }
+            long lengthInBytes = mem.LengthInBytes - indexInBytes;
+            infos[i] = new DescriptorBufferInfo
+            {
+                Buffer = buf.BufferHandle,
+                Offset = (ulong)indexInBytes,
+                Range = (ulong)lengthInBytes,
+            };
+            pc[i] = (int)v.Length;
         }
-        finally
+        if (scalars != null && scalars.Length > 0)
+            Array.Copy(scalars, 0, pc, count, scalars.Length);
+
+        // Trace (optional) the push-constant layout and values
+        VLTrace.Log($"LaunchKernelGeneric: views={count} scalars={(scalars?.Length ?? 0)} pc=[" + string.Join(",", pc) + "]");
+
+        fixed (DescriptorBufferInfo* pInfos = infos)
+        fixed (int* pPc = pc)
         {
-            vk.DestroyDescriptorPool(dev, pool, null);
+            var dset = AllocateAndWrite(vk, dev, kernel.DescriptorSetLayout, pInfos, (uint)infos.Length, out var pool);
+            try
+            {
+                BindAndDispatch(vk, dev, stream, kernel, dset, config, pPc, (uint)pc.Length);
+            }
+            finally
+            {
+                vk.DestroyDescriptorPool(dev, pool, null);
+            }
         }
     }
 
@@ -231,72 +240,7 @@ internal static class VLAPI
         }
     }
 
-    // 2 views + 1 scalar int
-    internal static unsafe void LaunchKernelWithStreamBinding<T>(
-        VLStream stream,
-        VLKernel kernel,
-        RuntimeKernelConfig config,
-        ArrayView<T> a,
-        ArrayView<T> b,
-        int s0)
-        where T : unmanaged
-    {
-        var acc = (VLAccelerator)stream.Accelerator;
-        var vk = acc.Vk;
-        var dev = acc.LogicalDevice;
-        kernel.EnsurePipeline();
-
-        var info = stackalloc DescriptorBufferInfo[2];
-        info[0] = GetBufferInfo(a);
-        info[1] = GetBufferInfo(b);
-        var dset = AllocateAndWrite(vk, dev, kernel.DescriptorSetLayout, info, 2, out var pool);
-        try
-        {
-            var vals = stackalloc int[3];
-            vals[0] = (int)a.Length;
-            vals[1] = (int)b.Length;
-            vals[2] = s0;
-            BindAndDispatch(vk, dev, stream, kernel, dset, config, vals, 3u);
-        }
-        finally
-        {
-            vk.DestroyDescriptorPool(dev, pool, null);
-        }
-    }
-
-    // 3 views
-    internal static unsafe void LaunchKernelWithStreamBinding<T>(
-        VLStream stream,
-        VLKernel kernel,
-        RuntimeKernelConfig config,
-        ArrayView<T> a,
-        ArrayView<T> b,
-        ArrayView<T> c)
-        where T : unmanaged
-    {
-        var acc = (VLAccelerator)stream.Accelerator;
-        var vk = acc.Vk;
-        var dev = acc.LogicalDevice;
-        kernel.EnsurePipeline();
-
-        var info = stackalloc DescriptorBufferInfo[3];
-        info[0] = GetBufferInfo(a);
-        info[1] = GetBufferInfo(b);
-        info[2] = GetBufferInfo(c);
-        var dset = AllocateAndWrite(vk, dev, kernel.DescriptorSetLayout, info, 3, out var pool);
-        try
-        {
-            var vals = stackalloc int[3];
-            vals[0] = (int)a.Length;
-            vals[1] = (int)b.Length;
-            vals[2] = (int)c.Length;
-            BindAndDispatch(vk, dev, stream, kernel, dset, config, vals, 3u);
-        }
-        finally
-        {
-            vk.DestroyDescriptorPool(dev, pool, null);
-        }
-    }
+    // Specialized launchers removed; use LaunchKernelGeneric.
 
     // 2 views (heterogeneous element types)
     internal static unsafe void LaunchKernelWithStreamBinding<T0, T1>(
@@ -330,113 +274,5 @@ internal static class VLAPI
         }
     }
 
-    // 3 views (heterogeneous element types)
-    internal static unsafe void LaunchKernelWithStreamBinding<T0, T1, T2>(
-        VLStream stream,
-        VLKernel kernel,
-        RuntimeKernelConfig config,
-        ArrayView<T0> a,
-        ArrayView<T1> b,
-        ArrayView<T2> c)
-        where T0 : unmanaged
-        where T1 : unmanaged
-        where T2 : unmanaged
-    {
-        var acc = (VLAccelerator)stream.Accelerator;
-        var vk = acc.Vk;
-        var dev = acc.LogicalDevice;
-        kernel.EnsurePipeline();
-
-        var info = stackalloc DescriptorBufferInfo[3];
-        info[0] = GetBufferInfo(a);
-        info[1] = GetBufferInfo(b);
-        info[2] = GetBufferInfo(c);
-        var dset = AllocateAndWrite(vk, dev, kernel.DescriptorSetLayout, info, 3, out var pool);
-        try
-        {
-            var vals = stackalloc int[3];
-            vals[0] = (int)a.Length;
-            vals[1] = (int)b.Length;
-            vals[2] = (int)c.Length;
-            BindAndDispatch(vk, dev, stream, kernel, dset, config, vals, 3u);
-        }
-        finally
-        {
-            vk.DestroyDescriptorPool(dev, pool, null);
-        }
-    }
-
-    // 3 views + 1 scalar int
-    internal static unsafe void LaunchKernelWithStreamBinding<T>(
-        VLStream stream,
-        VLKernel kernel,
-        RuntimeKernelConfig config,
-        ArrayView<T> a,
-        ArrayView<T> b,
-        ArrayView<T> c,
-        int s0)
-        where T : unmanaged
-    {
-        var acc = (VLAccelerator)stream.Accelerator;
-        var vk = acc.Vk;
-        var dev = acc.LogicalDevice;
-        kernel.EnsurePipeline();
-
-        var info = stackalloc DescriptorBufferInfo[3];
-        info[0] = GetBufferInfo(a);
-        info[1] = GetBufferInfo(b);
-        info[2] = GetBufferInfo(c);
-        var dset = AllocateAndWrite(vk, dev, kernel.DescriptorSetLayout, info, 3, out var pool);
-        try
-        {
-            var vals = stackalloc int[4];
-            vals[0] = (int)a.Length;
-            vals[1] = (int)b.Length;
-            vals[2] = (int)c.Length;
-            vals[3] = s0;
-            BindAndDispatch(vk, dev, stream, kernel, dset, config, vals, 4u);
-        }
-        finally
-        {
-            vk.DestroyDescriptorPool(dev, pool, null);
-        }
-    }
-
-    // 3 views + 2 scalar ints
-    internal static unsafe void LaunchKernelWithStreamBinding<T>(
-        VLStream stream,
-        VLKernel kernel,
-        RuntimeKernelConfig config,
-        ArrayView<T> a,
-        ArrayView<T> b,
-        ArrayView<T> c,
-        int s0,
-        int s1)
-        where T : unmanaged
-    {
-        var acc = (VLAccelerator)stream.Accelerator;
-        var vk = acc.Vk;
-        var dev = acc.LogicalDevice;
-        kernel.EnsurePipeline();
-
-        var info = stackalloc DescriptorBufferInfo[3];
-        info[0] = GetBufferInfo(a);
-        info[1] = GetBufferInfo(b);
-        info[2] = GetBufferInfo(c);
-        var dset = AllocateAndWrite(vk, dev, kernel.DescriptorSetLayout, info, 3, out var pool);
-        try
-        {
-            var vals = stackalloc int[5];
-            vals[0] = (int)a.Length;
-            vals[1] = (int)b.Length;
-            vals[2] = (int)c.Length;
-            vals[3] = s0;
-            vals[4] = s1;
-            BindAndDispatch(vk, dev, stream, kernel, dset, config, vals, 5u);
-        }
-        finally
-        {
-            vk.DestroyDescriptorPool(dev, pool, null);
-        }
-    }
+    // All specialized launchers removed; use LaunchKernelGeneric.
 }

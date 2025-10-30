@@ -16,7 +16,6 @@ using System;
 using System.Reflection;
 using ILGPU.Util;
 using System.Reflection.Emit;
-using System.Linq;
 
 namespace ILGPU.Runtime.Vulkan;
 
@@ -28,29 +27,7 @@ public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulk
 {
     #region Static
 
-    private static readonly MethodInfo Launch1OpenGeneric =
-        typeof(VLAccelerator).GetMethod(
-            nameof(Launch1),
-            BindingFlags.NonPublic | BindingFlags.Static)
-        .ThrowIfNull();
-
-    private static readonly MethodInfo Launch3OpenGeneric =
-        typeof(VLAccelerator).GetMethod(
-            nameof(Launch3),
-            BindingFlags.NonPublic | BindingFlags.Static)
-        .ThrowIfNull();
-
-    private static readonly MethodInfo Launch2OpenGeneric =
-        typeof(VLAccelerator).GetMethod(
-            nameof(Launch2),
-            BindingFlags.NonPublic | BindingFlags.Static)
-        .ThrowIfNull();
-
-    private static readonly MethodInfo Launch3ScalarOpenGeneric =
-        typeof(VLAccelerator).GetMethod(
-            nameof(Launch3Scalar),
-            BindingFlags.NonPublic | BindingFlags.Static)
-        .ThrowIfNull();
+    // No specialized launchers; invoke VLAPI.LaunchKernelGeneric directly.
 
     #endregion
     private static bool IsAnyArrayViewType(Type t)
@@ -190,9 +167,8 @@ public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulk
         KernelLauncherBuilder.EmitLoadAcceleratorStream<VLStream, ILEmitter>(
             Kernel.KernelStreamParamIdx,
             emitter);
-
-        // Load kernel
-        emitter.Emit(LocalOperation.Load, kernelLocal);
+        var streamLocal = emitter.DeclareLocal(typeof(VLStream));
+        emitter.Emit(LocalOperation.Store, streamLocal);
 
         // Load RuntimeKernelConfig
         KernelLauncherBuilder.EmitLoadRuntimeKernelConfig(
@@ -202,145 +178,54 @@ public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulk
             MaxGridSize,
             MaxGroupSize,
             customGroupSize);
+        var configLocal = emitter.DeclareLocal(typeof(RuntimeKernelConfig));
+        emitter.Emit(LocalOperation.Store, configLocal);
 
         // Build a plan with the Vulkan argument mapper
         var mapper = new ILGPU.Backends.Vulkan.VLArgumentMapper(Context);
         var plan = mapper.BuildPlan(entryPoint);
 
         var paramTypes = entryPoint.Parameters;
-        // If all view element types are identical, we can use generic helpers; otherwise
-        // fall back to mixed-type non-generic launchers using IArrayView.
-        bool AllSameElemType()
+
+        var viewsLocal = emitter.DeclareLocal(typeof(IArrayView[]));
+        var scalarsLocal = emitter.DeclareLocal(typeof(int[]));
+
+        emitter.LoadIntegerConstant(plan.ViewCount);
+        emitter.Emit(OpCodes.Newarr, typeof(IArrayView));
+        emitter.Emit(LocalOperation.Store, viewsLocal);
+        for (int i = 0; i < plan.ViewCount; i++)
         {
-            if (plan.ViewCount <= 1) return true;
-            var first = paramTypes[plan.ViewParamIndices[0]].GetGenericArguments()[0];
-            for (int i = 1; i < plan.ViewCount; i++)
-            {
-                var t = paramTypes[plan.ViewParamIndices[i]].GetGenericArguments()[0];
-                if (!ReferenceEquals(t, first)) return false;
-            }
-            return true;
+            int vIdx = plan.ViewParamIndices[i];
+            emitter.Emit(LocalOperation.Load, viewsLocal);
+            emitter.LoadIntegerConstant(i);
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + vIdx);
+            // box ArrayView<T> and cast to IArrayView
+            emitter.Emit(OpCodes.Box, paramTypes[vIdx]);
+            emitter.Emit(OpCodes.Castclass, typeof(IArrayView));
+            emitter.Emit(OpCodes.Stelem_Ref);
         }
 
-        if (!AllSameElemType())
+        // Allocate scalars array
+        emitter.LoadIntegerConstant(plan.ScalarIntCount);
+        emitter.Emit(OpCodes.Newarr, typeof(int));
+        emitter.Emit(LocalOperation.Store, scalarsLocal);
+        for (int i = 0; i < plan.ScalarIntCount; i++)
         {
-            if (plan.ScalarIntCount == 0 && plan.ViewCount == 3)
-            {
-                // Generic heterogeneous 3-view path: VLAPI.LaunchKernelWithStreamBinding<T0,T1,T2>
-                int v0 = plan.ViewParamIndices[0];
-                int v1 = plan.ViewParamIndices[1];
-                int v2 = plan.ViewParamIndices[2];
-                var t0 = paramTypes[v0].GetGenericArguments()[0];
-                var t1 = paramTypes[v1].GetGenericArguments()[0];
-                var t2 = paramTypes[v2].GetGenericArguments()[0];
-                var api = typeof(VLAPI).GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
-                    .First(m => m.Name == nameof(VLAPI.LaunchKernelWithStreamBinding)
-                        && m.IsGenericMethodDefinition
-                        && m.GetGenericArguments().Length == 3
-                        && m.GetParameters().Length == 6);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v2);
-                emitter.EmitCall(api.MakeGenericMethod(t0, t1, t2));
-            }
-            else if (plan.ScalarIntCount == 0 && plan.ViewCount == 2)
-            {
-                // Generic heterogeneous 2-view path: VLAPI.LaunchKernelWithStreamBinding<T0,T1>
-                int v0 = plan.ViewParamIndices[0];
-                int v1 = plan.ViewParamIndices[1];
-                var t0 = paramTypes[v0].GetGenericArguments()[0];
-                var t1 = paramTypes[v1].GetGenericArguments()[0];
-                var api = typeof(VLAPI).GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
-                    .First(m => m.Name == nameof(VLAPI.LaunchKernelWithStreamBinding)
-                        && m.IsGenericMethodDefinition
-                        && m.GetGenericArguments().Length == 2
-                        && m.GetParameters().Length == 5);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
-                emitter.EmitCall(api.MakeGenericMethod(t0, t1));
-            }
-            else
-            {
-                throw new NotImplementedException($"Unsupported heterogeneous layout: views={plan.ViewCount}, scalars={plan.ScalarIntCount}");
-            }
+            int sIdx = plan.ScalarIntParamIndices[i];
+            emitter.Emit(LocalOperation.Load, scalarsLocal);
+            emitter.LoadIntegerConstant(i);
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + sIdx);
+            emitter.Emit(OpCodes.Stelem_I4);
         }
-        else
-        {
-            // Original generic paths
-            if (plan.ViewCount == 1 && plan.ScalarIntCount == 0)
-            {
-                int p0 = plan.ViewParamIndices[0];
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + p0);
-                var elemType = paramTypes[p0].GetGenericArguments()[0];
-                var apiMethod = Launch1OpenGeneric.MakeGenericMethod(elemType);
-                emitter.EmitCall(apiMethod);
-            }
-            else if (plan.ViewCount == 2 && plan.ScalarIntCount == 1)
-            {
-                int v0 = plan.ViewParamIndices[0];
-                int v1 = plan.ViewParamIndices[1];
-                int s0 = plan.ScalarIntParamIndices[0];
-                var elemType = paramTypes[v0].GetGenericArguments()[0];
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + s0);
-                var api = typeof(VLAccelerator).GetMethod(nameof(Launch2Scalar), BindingFlags.NonPublic | BindingFlags.Static).ThrowIfNull();
-                emitter.EmitCall(api.MakeGenericMethod(elemType));
-            }
-            else if (plan.ViewCount == 2 && plan.ScalarIntCount == 0)
-            {
-                int v0 = plan.ViewParamIndices[0];
-                int v1 = plan.ViewParamIndices[1];
-                var elemType = paramTypes[v0].GetGenericArguments()[0];
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
-                emitter.EmitCall(Launch2OpenGeneric.MakeGenericMethod(elemType));
-            }
-            else if (plan.ViewCount == 3 && plan.ScalarIntCount == 0)
-            {
-                int v0 = plan.ViewParamIndices[0];
-                int v1 = plan.ViewParamIndices[1];
-                int v2 = plan.ViewParamIndices[2];
-                var elemType = paramTypes[v0].GetGenericArguments()[0];
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v2);
-                emitter.EmitCall(Launch3OpenGeneric.MakeGenericMethod(elemType));
-            }
-            else if (plan.ViewCount == 3 && plan.ScalarIntCount == 1)
-            {
-                int v0 = plan.ViewParamIndices[0];
-                int v1 = plan.ViewParamIndices[1];
-                int v2 = plan.ViewParamIndices[2];
-                int s0 = plan.ScalarIntParamIndices[0];
-                var elemType = paramTypes[v0].GetGenericArguments()[0];
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v2);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + s0);
-                emitter.EmitCall(Launch3ScalarOpenGeneric.MakeGenericMethod(elemType));
-            }
-            else if (plan.ViewCount == 3 && plan.ScalarIntCount == 2)
-            {
-                int v0 = plan.ViewParamIndices[0];
-                int v1 = plan.ViewParamIndices[1];
-                int v2 = plan.ViewParamIndices[2];
-                int s0 = plan.ScalarIntParamIndices[0];
-                int s1 = plan.ScalarIntParamIndices[1];
-                var elemType = paramTypes[v0].GetGenericArguments()[0];
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v0);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v1);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + v2);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + s0);
-                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + s1);
-                var api = typeof(VLAccelerator).GetMethod(nameof(Launch3Scalar2), BindingFlags.NonPublic | BindingFlags.Static).ThrowIfNull();
-                emitter.EmitCall(api.MakeGenericMethod(elemType));
-            }
-            else
-            {
-                throw new NotImplementedException($"Unsupported parameter layout: views={plan.ViewCount}, scalars={plan.ScalarIntCount}");
-            }
-        }
+
+        // Load preserved stream, kernel, config and call generic API
+        emitter.Emit(LocalOperation.Load, streamLocal);
+        emitter.Emit(LocalOperation.Load, kernelLocal);
+        emitter.Emit(LocalOperation.Load, configLocal);
+        emitter.Emit(LocalOperation.Load, viewsLocal);
+        emitter.Emit(LocalOperation.Load, scalarsLocal);
+        var genericApi = typeof(VLAPI).GetMethod(nameof(VLAPI.LaunchKernel), BindingFlags.NonPublic | BindingFlags.Static).ThrowIfNull();
+        emitter.EmitCall(genericApi);
 
         emitter.Emit(OpCodes.Ret);
         emitter.Finish();
@@ -431,67 +316,9 @@ public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulk
         _physicalDevice = selected.Value;
     }
 
-    #region Launcher helpers
-    private static void Launch1<T>(
-        VLStream stream,
-        VLKernel kernel,
-        RuntimeKernelConfig config,
-        ArrayView<T> a)
-        where T : unmanaged
-        => VLAPI.LaunchKernelWithStreamBinding<T>(stream, kernel, config, a);
-
-    private static void Launch3<T>(
-          VLStream stream,
-          VLKernel kernel,
-          RuntimeKernelConfig config,
-          ArrayView<T> a,
-          ArrayView<T> b,
-          ArrayView<T> c)
-          where T : unmanaged
-          => VLAPI.LaunchKernelWithStreamBinding<T>(stream, kernel, config, a, b, c);
-
-    private static void Launch2<T>(
-          VLStream stream,
-          VLKernel kernel,
-          RuntimeKernelConfig config,
-          ArrayView<T> a,
-          ArrayView<T> b)
-          where T : unmanaged
-          => VLAPI.LaunchKernelWithStreamBinding<T>(stream, kernel, config, a, b);
-
-    private static void Launch2Scalar<T>(
-        VLStream stream,
-        VLKernel kernel,
-        RuntimeKernelConfig config,
-        ArrayView<T> a,
-        ArrayView<T> b,
-        int s0)
-        where T : unmanaged
-        => VLAPI.LaunchKernelWithStreamBinding<T>(stream, kernel, config, a, b, s0);
-
-    private static void Launch3Scalar<T>(
-        VLStream stream,
-        VLKernel kernel,
-        RuntimeKernelConfig config,
-        ArrayView<T> a,
-        ArrayView<T> b,
-        ArrayView<T> c,
-        int s0)
-        where T : unmanaged
-        => VLAPI.LaunchKernelWithStreamBinding<T>(stream, kernel, config, a, b, c, s0);
-
-    private static void Launch3Scalar2<T>(
-        VLStream stream,
-        VLKernel kernel,
-        RuntimeKernelConfig config,
-        ArrayView<T> a,
-        ArrayView<T> b,
-        ArrayView<T> c,
-        int s0,
-        int s1)
-        where T : unmanaged
-        => VLAPI.LaunchKernelWithStreamBinding<T>(stream, kernel, config, a, b, c, s0, s1);
-    #endregion
+        #region Launcher helpers
+        // No specialized helpers needed; single generic path is used.
+        #endregion
 
     private void CreateDeviceAndQueue()
     {
