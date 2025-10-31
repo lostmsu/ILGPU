@@ -13,6 +13,8 @@ using ILGPU.IR.Analyses;
 using ILGPU.IR.Analyses.ControlFlowDirection;
 using ILGPU.IR.Types;
 using System;
+using System.Linq;
+using System.Runtime.InteropServices;
 using System.Collections.Generic;
 using ILGPU.Runtime;
 
@@ -33,6 +35,10 @@ internal sealed class MinimalVlTranslator
     private readonly Dictionary<uint, uint> bindingToVarId = new();
     // Scalar int parameter -> push-constant slot index
     private readonly Dictionary<int, uint> scalarPcIndex = new();
+    // Non-view (non-int) parameter -> (startSlot, wordCount)
+    private readonly Dictionary<int, (uint start, int words)> nonViewPc = new();
+    // Materialized push-constant words for parameters (SSA ids of i32 words)
+    private readonly Dictionary<int, (uint start, int words, uint[] wordIds)> pcParamWords = new();
     private int totalPcCount;
     private Dominators<Backwards>? postDom;
     private Dominators<Forwards>? dom;
@@ -124,16 +130,57 @@ internal sealed class MinimalVlTranslator
                 scalarCount++;
             }
         }
-        totalPcCount = checked((int)(binding + scalarCount));
+        // Pack remaining non-view parameters after view lengths and scalar ints
+        uint pcCursor = binding + scalarCount;
+        for (int i = 0, e = ep.Parameters.Count; i < e; ++i)
+        {
+            var pt = ep.Parameters[i];
+            if (IsAnyArrayViewType(pt) || pt == typeof(int))
+                continue;
+            int irParamIndex = ep.KernelIndexParameterOffset + i;
+            var irParam = method.Parameters[irParamIndex];
+            int bytes = irParam.Type.Size;
+            int words = (bytes + 3) / 4;
+            if (words > 0)
+            {
+                nonViewPc[irParamIndex] = (pcCursor, words);
+                pcCursor += (uint)words;
+            }
+        }
+        totalPcCount = checked((int)pcCursor);
         if (totalPcCount > 0)
             m.DeclarePushConstants((uint)totalPcCount);
+
+        // Emit entry block label and prologue materialization before visiting blocks
+        var firstBlock = method.Blocks.First();
+        m.BeginBlock(firstBlock);
+        // Materialize push-constant words for scalar ints and non-view parameters at the start of the entry block
+        foreach (var param in method.Parameters)
+        {
+            if (scalarPcIndex.TryGetValue(param.Index, out var sslot))
+            {
+                var w0 = m.EmitLoadPushConstant(sslot);
+                pcParamWords[param.Index] = (sslot, 1, new uint[] { w0 });
+            }
+            else if (nonViewPc.TryGetValue(param.Index, out var info))
+            {
+                var words = new uint[info.words];
+                for (int k = 0; k < info.words; k++)
+                    words[k] = m.EmitLoadPushConstant(info.start + (uint)k);
+                pcParamWords[param.Index] = (info.start, info.words, words);
+            }
+        }
 
         foreach (var block in method.Blocks)
         {
             // Pop selection-merge scope if we reached the merge block
             if (selectionMergeStack.Count > 0 && ReferenceEquals(selectionMergeStack.Peek(), block))
                 selectionMergeStack.Pop();
-            m.BeginBlock(block);
+            // We already began the first block above
+            if (!ReferenceEquals(block, firstBlock))
+            {
+                m.BeginBlock(block);
+            }
             currentBlock = block;
             var visitor = new Visitor(this);
             foreach (var entry in block)
@@ -447,6 +494,21 @@ internal sealed class MinimalVlTranslator
         expr = default; return false;
     }
 
+    // Resolves a value to a push-constant range (start slot and word count)
+    // Covers scalar int parameters and non-view value-type parameters packed into push constants.
+    private bool TryResolveMaterializedWords(Value v, out uint[] words)
+    {
+        var r = v.Resolve();
+        if (r is Parameter p && pcParamWords.TryGetValue(p.Index, out var info))
+        {
+            words = info.wordIds; return true;
+        }
+        // Unwrap simple shells generically
+        if (r is ConvertValue cv)
+            return TryResolveMaterializedWords(cv.Value.Resolve(), out words);
+        words = Array.Empty<uint>(); return false;
+    }
+
     private readonly struct Visitor : IValueVisitor
     {
         private readonly MinimalVlTranslator t;
@@ -509,10 +571,44 @@ internal sealed class MinimalVlTranslator
         }
         public void Visit(Store value)
         {
-            var ptr = t.GetOrBuild(value.Target.Resolve());
-            var val = t.GetOrBuild(value.Value.Resolve());
+            var target = value.Target.Resolve();
+            var valRes = value.Value.Resolve();
+
+            // If the stored value is a kernel parameter materialized from push constants
+            // and the target reduces to (binding, byteOffset), expand to per-word stores
+            if (t.TryResolveMaterializedWords(valRes, out var wordsArr) &&
+                wordsArr.Length > 0 &&
+                t.TryBuildPtrExpr(target, out var binding, out var byteId))
+            {
+                // Resolve varId for this binding
+                if (!t.bindingToVarId.TryGetValue(binding, out var varId))
+                {
+                    var redecl = t.m.DeclareStorageBuffer(binding, unsigned: false);
+                    varId = redecl.varId;
+                    t.bindingToVarId[binding] = varId;
+                }
+
+                // Compute starting element index = byteId >> 2
+                var totalU = t.m.EmitIntBitcast(byteId, toUnsigned: true);
+                var sh2U = t.m.EmitIntBitcast(t.m.EmitConstInt32(2), toUnsigned: true);
+                var elemIndexU = t.m.EmitShiftRight(totalU, sh2U, unsigned: true);
+                var elemIndex = t.m.EmitIntBitcast(elemIndexU, toUnsigned: false);
+
+                for (int k = 0; k < wordsArr.Length; k++)
+                {
+                    var idxK = t.m.EmitAdd(elemIndex, t.m.EmitConstInt32(k), unsigned: false);
+                    var ptrK = t.m.AccessChainElement(varId, idxK, unsigned: false);
+                    t.m.EmitStore(ptrK, wordsArr[k]);
+                }
+                VLTrace.Log($"Store expanded: words={wordsArr.Length} target={DescribeValue(target)}");
+                return;
+            }
+
+            // Fallback: generic pointer/value store
+            var ptr = t.GetOrBuild(target);
+            var val = t.GetOrBuild(valRes);
             t.m.EmitStore(ptr, val);
-            VLTrace.Log($"Store: ptr={ptr} val={val} targetChain={DescribeValue(value.Target.Resolve())}");
+            VLTrace.Log($"Store: ptr={ptr} val={val} targetChain={DescribeValue(target)}");
         }
         public void Visit(ReturnTerminator value) => t.m.EmitReturn();
         public void Visit(CompareValue value)
@@ -579,6 +675,7 @@ internal sealed class MinimalVlTranslator
             }
             t.m.SetOrigin(resId, t.ep.MethodInfo.Name, nameof(ConvertValue), value.ToString());
             t.idMap[value] = resId;
+
         }
         public void Visit(GetField value)
         {

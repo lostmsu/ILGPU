@@ -25,11 +25,6 @@ namespace ILGPU.Runtime.Vulkan;
 [Obsolete("Not implemented")]
 public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulkan.VLCompiledKernel, VLKernel>
 {
-    #region Static
-
-    // No specialized launchers; invoke VLAPI.LaunchKernelGeneric directly.
-
-    #endregion
     private static bool IsAnyArrayViewType(Type t)
     {
         if (!t.IsGenericType) return false;
@@ -189,6 +184,7 @@ public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulk
 
         var viewsLocal = emitter.DeclareLocal(typeof(IArrayView[]));
         var scalarsLocal = emitter.DeclareLocal(typeof(int[]));
+        var cursorLocal = emitter.DeclareLocal(typeof(int));
 
         emitter.LoadIntegerConstant(plan.ViewCount);
         emitter.Emit(OpCodes.Newarr, typeof(IArrayView));
@@ -205,10 +201,22 @@ public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulk
             emitter.Emit(OpCodes.Stelem_Ref);
         }
 
-        // Allocate scalars array
-        emitter.LoadIntegerConstant(plan.ScalarIntCount);
+        // Allocate scalars array sized to compiled PushConstantCount minus view lengths
+        // kernelLocal is already stored; load its PushConstantCount property
+        emitter.Emit(LocalOperation.Load, kernelLocal);
+        var pcCountProp = typeof(VLKernel).GetProperty("PushConstantCount", BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public).ThrowIfNull();
+        var getter = pcCountProp.GetGetMethod(nonPublic: true).ThrowIfNull();
+        emitter.EmitCall(getter);
+        // subtract viewCount
+        emitter.LoadIntegerConstant(plan.ViewCount);
+        emitter.Emit(OpCodes.Sub);
         emitter.Emit(OpCodes.Newarr, typeof(int));
         emitter.Emit(LocalOperation.Store, scalarsLocal);
+
+        // Initialize cursor to scalarIntCount (relative to scalars array)
+        emitter.LoadIntegerConstant(plan.ScalarIntCount);
+        emitter.Emit(LocalOperation.Store, cursorLocal);
+
         for (int i = 0; i < plan.ScalarIntCount; i++)
         {
             int sIdx = plan.ScalarIntParamIndices[i];
@@ -218,18 +226,42 @@ public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulk
             emitter.Emit(OpCodes.Stelem_I4);
         }
 
+        // Append non-view parameters as raw 32-bit words using VLAPI.PackIntoInt32WordsObject
+        var packObjMethod = typeof(VLAPI).GetMethod(nameof(VLAPI.PackIntoInt32WordsObject)).ThrowIfNull();
+        for (int i = 0; i < paramTypes.Count; i++)
+        {
+            var pt = paramTypes[i];
+            if (IsAnyArrayViewType(pt) || pt == typeof(int))
+                continue;
+            // value (boxed)
+            emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + i);
+            emitter.Emit(OpCodes.Box, pt);
+            // array
+            emitter.Emit(LocalOperation.Load, scalarsLocal);
+            // start index from cursor
+            emitter.Emit(LocalOperation.Load, cursorLocal);
+            // call and get words written
+            emitter.EmitCall(packObjMethod);
+            // increment cursor by returned word count
+            emitter.Emit(LocalOperation.Load, cursorLocal);
+            emitter.Emit(OpCodes.Add);
+            emitter.Emit(LocalOperation.Store, cursorLocal);
+        }
+
         // Load preserved stream, kernel, config and call generic API
         emitter.Emit(LocalOperation.Load, streamLocal);
         emitter.Emit(LocalOperation.Load, kernelLocal);
         emitter.Emit(LocalOperation.Load, configLocal);
         emitter.Emit(LocalOperation.Load, viewsLocal);
         emitter.Emit(LocalOperation.Load, scalarsLocal);
-        var genericApi = typeof(VLAPI).GetMethod(nameof(VLAPI.LaunchKernel), BindingFlags.NonPublic | BindingFlags.Static).ThrowIfNull();
+        var genericApi = typeof(VLAPI).GetMethod(nameof(VLAPI.Launch), BindingFlags.NonPublic | BindingFlags.Static).ThrowIfNull();
         emitter.EmitCall(genericApi);
 
         emitter.Emit(OpCodes.Ret);
         emitter.Finish();
-        return launcher.Finish();
+        var mi = launcher.Finish();
+        ILGPU.Backends.Vulkan.ILDebug.ValidateAndDump(mi);
+        return mi;
     }
 
     protected override VLKernel CreateKernel(ILGPU.Backends.Vulkan.VLCompiledKernel compiledKernel)

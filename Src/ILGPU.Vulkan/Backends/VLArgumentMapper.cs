@@ -8,8 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using ILGPU.Backends.EntryPoints;
-using ILGPU;
 using ILGPU.Runtime;
 
 namespace ILGPU.Backends.Vulkan;
@@ -36,14 +36,18 @@ internal sealed class VLArgumentMapper : ArgumentMapper
         // No-op: Vulkan descriptors are prepared at dispatch.
     }
 
+    internal sealed record NonViewPcInfo(int ParamIndex, int StartSlot, int WordCount);
+
     internal sealed record Plan(
         IReadOnlyList<ILGPU.Backends.Vulkan.VLCompiledKernel.BindingInfo> Bindings,
         int PushConstantCount,
         int[] ViewParamIndices,
-        int[] ScalarIntParamIndices)
+        int[] ScalarIntParamIndices,
+        NonViewPcInfo[] NonViewPc)
     {
         public int ViewCount => ViewParamIndices.Length;
         public int ScalarIntCount => ScalarIntParamIndices.Length;
+        public int TotalScalarWordCount => ScalarIntCount + (NonViewPc?.Sum(i => i.WordCount) ?? 0);
     }
 
     private static bool IsAnyArrayViewType(Type t)
@@ -68,6 +72,7 @@ internal sealed class VLArgumentMapper : ArgumentMapper
         var bindings = new List<ILGPU.Backends.Vulkan.VLCompiledKernel.BindingInfo>();
         var viewIdx = new List<int>();
         var scalarIdx = new List<int>();
+        var nonViewPc = new List<NonViewPcInfo>();
 
         uint binding = 0;
         var parameters = entryPoint.Parameters;
@@ -86,8 +91,9 @@ internal sealed class VLArgumentMapper : ArgumentMapper
             }
         }
 
-        // Push constants: view lengths + scalar ints
+        // After view lengths and scalar ints, non-view packing is handled at runtime.
+        // The compiled kernel's PushConstantCount (from IR sizes) is used for allocation.
         var pushConstantCount = checked((int)binding) + scalarIdx.Count;
-        return new Plan(bindings, pushConstantCount, viewIdx.ToArray(), scalarIdx.ToArray());
+        return new Plan(bindings, pushConstantCount, viewIdx.ToArray(), scalarIdx.ToArray(), Array.Empty<NonViewPcInfo>());
     }
 }

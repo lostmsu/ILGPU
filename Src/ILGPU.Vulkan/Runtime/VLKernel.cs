@@ -147,4 +147,5 @@ public sealed class VLKernel : Kernel
     internal PipelineLayout PipelineLayout => _layout;
     internal Pipeline Pipeline => _pipeline;
     internal int BindingCount => _compiled.Bindings?.Length ?? 0;
+    internal int PushConstantCount => _compiled.PushConstantCount;
 }

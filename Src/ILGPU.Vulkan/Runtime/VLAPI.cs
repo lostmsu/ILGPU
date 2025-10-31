@@ -9,13 +9,51 @@
 using ILGPU;
 using ILGPU.Runtime;
 using ILGPU.Backends.Vulkan;
+using VkBuffer = Silk.NET.Vulkan.Buffer;
 using System;
 using Silk.NET.Vulkan;
+using ILGPU.Util;
 
 namespace ILGPU.Runtime.Vulkan;
 
 internal static class VLAPI
 {
+    private static readonly System.Reflection.MethodInfo s_packGeneric =
+        typeof(VLAPI).GetMethod(nameof(PackIntoInt32Words))
+        .ThrowIfNull();
+    // Packs an unmanaged value into an int[] at a given start index as little-endian 32-bit words
+    public static void PackIntoInt32Words<T>(T value, int[] array, int start)
+        where T : unmanaged
+    {
+        if (array is null) throw new ArgumentNullException(nameof(array));
+        if ((uint)start > (uint)array.Length) throw new ArgumentOutOfRangeException(nameof(start));
+        int bytes = System.Runtime.CompilerServices.Unsafe.SizeOf<T>();
+        int wordCount = (bytes + 3) / 4;
+        var destWords = new Span<int>(array, start, wordCount);
+        destWords.Clear();
+        // Create a one-element span over the value and copy its raw bytes
+        T local = value;
+        var src = System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref local, 1);
+        var srcBytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(src);
+        var dstBytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(destWords);
+        srcBytes.CopyTo(dstBytes);
+    }
+
+    // Packs a boxed unmanaged value into an int[] and returns the number of words written
+    public static int PackIntoInt32WordsObject(object value, int[] array, int start)
+    {
+        if (value is null) throw new ArgumentNullException(nameof(value));
+        if (array is null) throw new ArgumentNullException(nameof(array));
+        var type = value.GetType();
+        // Compute words based on runtime concrete type
+        int bytes = ILGPU.Interop.SizeOf(type);
+        int words = (bytes + 3) / 4;
+        // Invoke generic pack with runtime type
+        var gm = s_packGeneric.MakeGenericMethod(type);
+        gm.Invoke(null, new object[] { value, array, start });
+        return words;
+    }
+
     // Builds buffer descriptor info for a given view
     internal static unsafe DescriptorBufferInfo GetBufferInfo<T>(ArrayView<T> view)
         where T : unmanaged
@@ -174,7 +212,7 @@ internal static class VLAPI
                         indexInBytes = baseCav.IndexInBytes;
                 }
             }
-            long lengthInBytes = mem.LengthInBytes - indexInBytes;
+            long lengthInBytes = v.LengthInBytes;
             infos[i] = new DescriptorBufferInfo
             {
                 Buffer = buf.BufferHandle,
@@ -187,7 +225,7 @@ internal static class VLAPI
             Array.Copy(scalars, 0, pc, count, scalars.Length);
 
         // Trace (optional) the push-constant layout and values
-        VLTrace.Log($"LaunchKernelGeneric: views={count} scalars={(scalars?.Length ?? 0)} pc=[" + string.Join(",", pc) + "]");
+        VLTrace.Log($"Launch: views={count} scalars={(scalars?.Length ?? 0)} pc=[" + string.Join(",", pc) + "]");
 
         fixed (DescriptorBufferInfo* pInfos = infos)
         fixed (int* pPc = pc)
@@ -240,8 +278,6 @@ internal static class VLAPI
         }
     }
 
-    // Specialized launchers removed; use LaunchKernelGeneric.
-
     // 2 views (heterogeneous element types)
     internal static unsafe void LaunchKernelWithStreamBinding<T0, T1>(
         VLStream stream,
@@ -273,6 +309,4 @@ internal static class VLAPI
             vk.DestroyDescriptorPool(dev, pool, null);
         }
     }
-
-    // All specialized launchers removed; use LaunchKernelGeneric.
 }

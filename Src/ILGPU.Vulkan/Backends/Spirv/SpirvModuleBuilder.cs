@@ -172,6 +172,20 @@ internal sealed class SpirvModuleBuilder
         functionStarted = true;
     }
 
+    // Ensures there is at least one active block label to accept function instructions.
+    public void EnsureEntryLabel()
+    {
+        BeginFunction();
+        if (!hasAnyLabel)
+        {
+            var lbl = NewId();
+            func.Add(sw => sw.Write(Op.Label, lbl));
+            currentBlockLabelId = lbl;
+            hasAnyLabel = true;
+            lastBlockHasTerminator = false;
+        }
+    }
+
     public uint NewId() => nextId++;
 
     public void DeclareBlocks(Method method)
@@ -447,7 +461,7 @@ internal sealed class SpirvModuleBuilder
     {
         if (pcVarId == 0)
             throw new InvalidOperationException("Push constants not declared");
-        BeginFunction();
+        EnsureEntryLabel();
         // Access member index
         var memberIndexConstId = EmitConstInt32((int)index);
         var ptr = NewId();
@@ -456,6 +470,9 @@ internal sealed class SpirvModuleBuilder
         func.Add(sw => sw.Write(Op.Load, idInt, val, ptr));
         return val;
     }
+
+    // Generic push-constant load helper for an int slot
+    public uint EmitLoadPushConstant(uint index) => EmitLoadViewLength(index);
 
     private uint EnsurePrimitiveType(BasicValueType bvt)
     {

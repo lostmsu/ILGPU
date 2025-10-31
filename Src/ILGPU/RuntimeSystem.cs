@@ -100,14 +100,29 @@ namespace ILGPU
             public MethodEmitter(
                 DynamicMethod method)
             {
-                Method = method;
+                Method = method ?? throw new ArgumentNullException(nameof(method));
                 ILGenerator = method.GetILGenerator();
+            }
+
+            /// <summary>
+            /// Constructs a new method emitter.
+            /// </summary>
+            /// <param name="builder">The desired method builder.</param>
+            /// <param name="type">The associated type builder.</param>
+            public MethodEmitter(MethodBuilder builder, TypeBuilder type)
+            {
+                Method = null;
+                methodBuilder = builder ?? throw new ArgumentNullException(nameof(builder));
+                typeBuilder = type ?? throw new ArgumentNullException(nameof(type));
+                ILGenerator = builder.GetILGenerator();
             }
 
             /// <summary>
             /// Returns the associated method builder.
             /// </summary>
-            internal DynamicMethod Method { get; }
+            internal DynamicMethod? Method { get; }
+            private readonly MethodBuilder? methodBuilder;
+            private readonly TypeBuilder? typeBuilder;
 
             /// <summary>
             /// Returns the internal IL generator.
@@ -118,7 +133,17 @@ namespace ILGPU
             /// Finishes the building process.
             /// </summary>
             /// <returns>The emitted method.</returns>
-            public MethodInfo Finish() => Method;
+            public MethodInfo Finish()
+            {
+                if (Method != null)
+                    return Method;
+                // Create the type and return the created method info
+                var tb = typeBuilder.ThrowIfNull();
+                var createdType = tb.CreateType().ThrowIfNull();
+                var mb = methodBuilder.ThrowIfNull();
+                var mi = createdType.GetMethod(mb.Name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static).ThrowIfNull();
+                return mi;
+            }
         }
 
         #endregion
@@ -270,13 +295,33 @@ namespace ILGPU
         {
             var scopedLock = new ScopedLock(this);
 
-            methodEmitter = new MethodEmitter(
-                new DynamicMethod(
+            // If IL dump/validation is enabled, emit into a real type/method so
+            // MethodInfo.GetMethodBody() returns IL for diagnostics
+            var dump = string.Equals(Environment.GetEnvironmentVariable("ILGPU_IL_DUMP"), "1", StringComparison.Ordinal)
+                || string.Equals(Environment.GetEnvironmentVariable("ILGPU_IL_VALIDATE"), "1", StringComparison.Ordinal);
+            if (dump)
+            {
+                // Define a new runtime class and a public static method
+                var typeScope = DefineRuntimeClass(typeof(object), out var tb);
+                // Merge locks to avoid lifetime issues (outer scopedLock still guards)
+                typeScope.Dispose();
+                var mb = tb.DefineMethod(
                     LauncherMethodName,
+                    MethodAttributes.Public | MethodAttributes.Static,
                     returnType,
-                    parameterTypes,
-                    moduleBuilder,
-                    true));
+                    parameterTypes);
+                methodEmitter = new MethodEmitter(mb, tb);
+            }
+            else
+            {
+                methodEmitter = new MethodEmitter(
+                    new DynamicMethod(
+                        LauncherMethodName,
+                        returnType,
+                        parameterTypes,
+                        moduleBuilder,
+                        true));
+            }
 
             return scopedLock;
         }
