@@ -89,6 +89,7 @@ internal static class VLAPI
             Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
         };
         vk.BeginCommandBuffer(cmd, in bi).ThrowOnError();
+        kernel.EnsurePipeline(config);
         vk.CmdBindPipeline(cmd, PipelineBindPoint.Compute, kernel.Pipeline);
         DescriptorSet* pSet = stackalloc DescriptorSet[1];
         pSet[0] = dset;
@@ -184,12 +185,12 @@ internal static class VLAPI
         var acc = (VLAccelerator)stream.Accelerator;
         var vk = acc.Vk;
         var dev = acc.LogicalDevice;
-        kernel.EnsurePipeline();
+        kernel.EnsurePipeline(config);
 
         // Build descriptors and push constants
         var count = views?.Length ?? 0;
         var infos = new DescriptorBufferInfo[count];
-        var pc = new int[count + (scalars?.Length ?? 0)];
+        var pc = new int[count * 2 + (scalars?.Length ?? 0)];
         for (int i = 0; i < count; i++)
         {
             var v = views[i];
@@ -220,9 +221,10 @@ internal static class VLAPI
                 Range = (ulong)lengthInBytes,
             };
             pc[i] = (int)v.Length;
+            pc[count + i] = (int)indexInBytes;
         }
         if (scalars != null && scalars.Length > 0)
-            Array.Copy(scalars, 0, pc, count, scalars.Length);
+            Array.Copy(scalars, 0, pc, count * 2, scalars.Length);
 
         // Trace (optional) the push-constant layout and values
         VLTrace.Log($"Launch: views={count} scalars={(scalars?.Length ?? 0)} pc=[" + string.Join(",", pc) + "]");
@@ -253,7 +255,7 @@ internal static class VLAPI
         var acc = (VLAccelerator)stream.Accelerator;
         var vk = acc.Vk;
         var dev = acc.LogicalDevice;
-        kernel.EnsurePipeline();
+        kernel.EnsurePipeline(config);
 
         DescriptorBufferInfo* pInfos = stackalloc DescriptorBufferInfo[buffers.Length];
         for (int i = 0; i < buffers.Length; i++) pInfos[i] = buffers[i];
@@ -291,7 +293,7 @@ internal static class VLAPI
         var acc = (VLAccelerator)stream.Accelerator;
         var vk = acc.Vk;
         var dev = acc.LogicalDevice;
-        kernel.EnsurePipeline();
+        kernel.EnsurePipeline(config);
 
         var info = stackalloc DescriptorBufferInfo[2];
         info[0] = GetBufferInfo(a);

@@ -26,9 +26,11 @@ internal static class VLCodeGenerator
 
     public static Result Generate(EntryPoint entryPoint, in Backend.BackendContext backendContext)
     {
+        IRDebug.DumpKernelIR(entryPoint, backendContext, "pre");
         var module = new SpirvModuleBuilder(entryPoint);
-        var translator = new MinimalVlTranslator(module, entryPoint);
+        var translator = new VLTranslator(module, entryPoint);
         translator.TranslateKernel(backendContext);
+        IRDebug.DumpKernelIR(entryPoint, backendContext, "post");
         var words = module.ToUIntArray();
         var spvPath = SpirvDebug.Dump("vl-last", words);
         if (spvPath != null && string.Equals(Environment.GetEnvironmentVariable("ILGPU_VULKAN_MAP"), "1", StringComparison.Ordinal))

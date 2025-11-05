@@ -48,6 +48,7 @@ internal sealed class SpirvModuleBuilder
     private uint constTrueId;
     private uint constFalseId;
     private readonly uint idPtrInV3u, idPtrStorageUint, idPtrStorageInt;
+    private uint idPtrStorageULong, idPtrStorageLong;
     private uint idPtrPushInt;
     private readonly uint idConst0;
     private readonly uint idGlGlobalInvocationId;
@@ -58,14 +59,22 @@ internal sealed class SpirvModuleBuilder
 
     // Sectioned emission
     private readonly List<Action<SpirvWriter>> capabilities = [];
+    private readonly List<Action<SpirvWriter>> extensions = [];
     private Action<SpirvWriter>? memoryModel;
     private readonly List<Action<SpirvWriter>> entryAndModes = [];
     private readonly List<uint> entryInterface = [];
     private readonly List<Action<SpirvWriter>> annotations = [];
     private readonly List<Action<SpirvWriter>> typesGlobals = [];
     private readonly List<Action<SpirvWriter>> func = [];
+    // Workgroup size specialization constants (SpecId 0/1/2)
+    private uint specLocalSizeXId;
+    private uint specLocalSizeYId;
+    private uint specLocalSizeZId;
     private uint currentBlockLabelId;
     private readonly Dictionary<uint, Origin> origins = new();
+    private readonly System.Collections.Generic.HashSet<uint> storageVarIds = new();
+    private readonly System.Collections.Generic.HashSet<uint> valueIds = new();
+    private readonly System.Collections.Generic.HashSet<uint> constIds = new();
 
     private string? currentMethod;
     private string? currentValueKind;
@@ -96,16 +105,10 @@ internal sealed class SpirvModuleBuilder
         idGlNumWorkgroups = NewId();
         entryFuncId = NewId();
 
-        // Entry point and execution mode (queued)
+        // Entry point and execution mode (queued).
         entryInterface.Add(idGlGlobalInvocationId);
         entryAndModes.Add(sw => sw.OpEntryPointCompute(entryFuncId, "main", entryInterface.ToArray()));
-        entryAndModes.Add(sw => sw.OpExecutionModeLocalSize(entryFuncId, 64u, 1u, 1u));
-
-        // Annotations (decorations) queued
-        annotations.Add(sw => sw.Write(Op.Decorate, idGlGlobalInvocationId, (uint)Decoration.BuiltIn, (uint)BuiltIn.GlobalInvocationId));
-        annotations.Add(sw => sw.Write(Op.Decorate, idGlNumWorkgroups, (uint)Decoration.BuiltIn, (uint)BuiltIn.NumWorkgroups));
-
-        // Types (queued)
+        // Types (queued) — ensure base types exist before constants/spec constants
         idVoid = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeVoid, idVoid));
         idBool = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeBool, idBool));
         idUint = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeInt, idUint, 32u, 0u));
@@ -117,6 +120,13 @@ internal sealed class SpirvModuleBuilder
         idPtrStorageInt = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypePointer, idPtrStorageInt, (uint)StorageClass.StorageBuffer, idInt));
         idPtrPushInt = 0; // deferred until DeclarePushConstants
         idFuncType = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypeFunction, idFuncType, idVoid));
+
+        // Use fixed local size for now; specialization can be reintroduced later.
+        entryAndModes.Add(sw => sw.OpExecutionModeLocalSize(entryFuncId, 64u, 1u, 1u));
+
+        // Annotations (decorations) queued
+        annotations.Add(sw => sw.Write(Op.Decorate, idGlGlobalInvocationId, (uint)Decoration.BuiltIn, (uint)BuiltIn.GlobalInvocationId));
+        annotations.Add(sw => sw.Write(Op.Decorate, idGlNumWorkgroups, (uint)Decoration.BuiltIn, (uint)BuiltIn.NumWorkgroups));
 
         // Globals (queued)
         typesGlobals.Add(sw => sw.Write(Op.Variable, idPtrInV3u, idGlGlobalInvocationId, (uint)StorageClass.Input));
@@ -215,12 +225,12 @@ internal sealed class SpirvModuleBuilder
         }
     }
 
-    public (uint structId, uint varId) DeclareStorageBuffer(uint binding, bool unsigned)
+    public (uint structId, uint varId) DeclareStorageBuffer(uint binding, int elemSizeBytes, bool unsigned)
     {
-        var elem = unsigned ? idUint : idInt;
+        uint elem = elemSizeBytes == 8 ? GetIntTypeId(64, unsigned) : (unsigned ? idUint : idInt);
         var idRuntimeArr = NewId();
         // Queue annotations for the runtime array and struct
-        annotations.Add(sw => sw.Write(Op.Decorate, idRuntimeArr, (uint)Decoration.ArrayStride, 4u));
+        annotations.Add(sw => sw.Write(Op.Decorate, idRuntimeArr, (uint)Decoration.ArrayStride, (uint)elemSizeBytes));
         var structId = NewId();
         annotations.Add(sw => sw.Write(Op.MemberDecorate, structId, 0u, (uint)Decoration.Offset, 0u));
         annotations.Add(sw => sw.Write(Op.Decorate, structId, (uint)Decoration.Block));
@@ -229,6 +239,7 @@ internal sealed class SpirvModuleBuilder
         typesGlobals.Add(sw => sw.Write(Op.TypeStruct, structId, idRuntimeArr));
         var ptrStruct = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypePointer, ptrStruct, (uint)StorageClass.StorageBuffer, structId));
         var varId = NewId(); typesGlobals.Add(sw => sw.Write(Op.Variable, ptrStruct, varId, (uint)StorageClass.StorageBuffer));
+        storageVarIds.Add(varId);
         // Variable descriptor decorations (annotation section)
         annotations.Add(sw => sw.Write(Op.Decorate, varId, (uint)Decoration.DescriptorSet, 0u));
         annotations.Add(sw => sw.Write(Op.Decorate, varId, (uint)Decoration.Binding, binding));
@@ -238,37 +249,83 @@ internal sealed class SpirvModuleBuilder
     public uint EmitLoadGlobalIndex(DeviceConstantDimension3D dim)
     {
         BeginFunction();
-        var gid = NewId(); func.Add(sw => sw.Write(Op.Load, idV3u, gid, idGlGlobalInvocationId));
+        var gid = NewId(); func.Add(sw => sw.Write(Op.Load, idV3u, gid, idGlGlobalInvocationId)); valueIds.Add(gid);
         var comp = dim switch { DeviceConstantDimension3D.Y => 1u, DeviceConstantDimension3D.Z => 2u, _ => 0u };
-        var idx = NewId(); func.Add(sw => sw.Write(Op.CompositeExtract, idUint, idx, gid, comp));
+        var idx = NewId(); func.Add(sw => sw.Write(Op.CompositeExtract, idUint, idx, gid, comp)); valueIds.Add(idx);
         return idx;
     }
 
     public uint EmitLoadNumWorkgroups(DeviceConstantDimension3D dim)
     {
         BeginFunction();
-        var ng = NewId(); func.Add(sw => sw.Write(Op.Load, idV3u, ng, idGlNumWorkgroups));
+        var ng = NewId(); func.Add(sw => sw.Write(Op.Load, idV3u, ng, idGlNumWorkgroups)); valueIds.Add(ng);
         var comp = dim switch { DeviceConstantDimension3D.Y => 1u, DeviceConstantDimension3D.Z => 2u, _ => 0u };
-        var val = NewId(); func.Add(sw => sw.Write(Op.CompositeExtract, idUint, val, ng, comp));
+        var val = NewId(); func.Add(sw => sw.Write(Op.CompositeExtract, idUint, val, ng, comp)); valueIds.Add(val);
         return val;
     }
 
-    public uint AccessChainElement(uint bufVarId, uint indexId, bool unsigned)
+    public uint AccessChainElement(uint bufVarId, uint indexId, bool unsigned, int elemSizeBytes)
     {
         BeginFunction();
-        var ptrType = unsigned ? idPtrStorageUint : idPtrStorageInt;
+        uint ptrType;
+        if (elemSizeBytes == 8)
+        {
+            // Ensure pointer-to-64-bit types exist
+            EnsureInt64Capability();
+            if (unsigned)
+            {
+                if (idPtrStorageULong == 0)
+                {
+                    if (idULong == 0) idULong = GetIntTypeId(64, true);
+                    idPtrStorageULong = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypePointer, idPtrStorageULong, (uint)StorageClass.StorageBuffer, idULong));
+                }
+                ptrType = idPtrStorageULong;
+            }
+            else
+            {
+                if (idPtrStorageLong == 0)
+                {
+                    if (idLong == 0) idLong = GetIntTypeId(64, false);
+                    idPtrStorageLong = NewId(); typesGlobals.Add(sw => sw.Write(Op.TypePointer, idPtrStorageLong, (uint)StorageClass.StorageBuffer, idLong));
+                }
+                ptrType = idPtrStorageLong;
+            }
+        }
+        else
+        {
+            ptrType = unsigned ? idPtrStorageUint : idPtrStorageInt;
+        }
         var ptr = NewId();
-        func.Add(sw => sw.Write(Op.AccessChain, ptrType, ptr, bufVarId, idConst0, indexId));
+        func.Add(sw => sw.Write(Op.AccessChain, ptrType, ptr, bufVarId, idConst0, indexId)); valueIds.Add(ptr);
         return ptr;
     }
 
-    public uint EmitLoadScalar(uint ptrId, bool unsigned)
+    public uint EmitLoadScalar(uint ptrId, bool unsigned, int elemSizeBytes)
     {
         BeginFunction();
-        var elem = unsigned ? idUint : idInt;
+        uint elem = elemSizeBytes == 8 ? GetIntTypeId(64, unsigned) : (unsigned ? idUint : idInt);
         var val = NewId();
-        func.Add(sw => sw.Write(Op.Load, elem, val, ptrId));
+        func.Add(sw => sw.Write(Op.Load, elem, val, ptrId)); valueIds.Add(val);
         return val;
+    }
+
+    public uint EmitUMod(uint aId, uint bConst)
+    {
+        BeginFunction();
+        // Expect 32-bit int modulo; cast to unsigned
+        var au = EmitIntBitcast(aId, true);
+        var bu = EmitIntBitcast(bConst, true);
+        var res = NewId();
+        func.Add(sw => sw.Write(Op.UMod, idUint, res, au, bu)); valueIds.Add(res);
+        return EmitIntBitcast(res, false);
+    }
+
+    public uint EmitSelectInt(uint condBool, uint aId, uint bId)
+    {
+        BeginFunction();
+        var res = NewId();
+        func.Add(sw => sw.Write(Op.Select, idInt, res, condBool, aId, bId)); valueIds.Add(res);
+        return res;
     }
 
     private bool capInt64Added;
@@ -312,18 +369,24 @@ internal sealed class SpirvModuleBuilder
     public uint EmitAdd(uint aId, uint bId, bool unsigned, int width = 32)
     {
         BeginFunction();
+        ValidateIntOperand(aId);
+        ValidateIntOperand(bId);
         var elem = GetIntTypeId(width, unsigned);
         var res = NewId();
-        func.Add(sw => sw.Write(Op.IAdd, elem, res, aId, bId));
+        func.Add(sw => sw.Write(Op.IAdd, elem, res, aId, bId)); valueIds.Add(res);
         return res;
     }
 
     public uint EmitSub(uint aId, uint bId, bool unsigned, int width = 32)
     {
         BeginFunction();
+        if (storageVarIds.Contains(aId) || storageVarIds.Contains(bId))
+            throw new InvalidOperationException($"EmitSub received storage var ids: a={aId} b={bId}");
+        ValidateIntOperand(aId);
+        ValidateIntOperand(bId);
         var elem = GetIntTypeId(width, unsigned);
         var res = NewId();
-        func.Add(sw => sw.Write(Op.ISub, elem, res, aId, bId));
+        func.Add(sw => sw.Write(Op.ISub, elem, res, aId, bId)); valueIds.Add(res);
         return res;
     }
 
@@ -427,6 +490,15 @@ internal sealed class SpirvModuleBuilder
         return res;
     }
 
+    public uint EmitSelectWidth(uint condBoolId, uint trueValId, uint falseValId, int width, bool unsigned)
+    {
+        BeginFunction();
+        var elem = width == 64 ? GetIntTypeId(64, unsigned) : (unsigned ? idUint : idInt);
+        var res = NewId();
+        func.Add(sw => sw.Write(Op.Select, elem, res, condBoolId, trueValId, falseValId));
+        return res;
+    }
+
     public uint EmitMulUint(uint aId, uint bId)
     {
         BeginFunction();
@@ -443,6 +515,15 @@ internal sealed class SpirvModuleBuilder
         var targetType = toUnsigned ? idUint : idInt;
         var res = NewId();
         func.Add(sw => sw.Write(Op.Bitcast, targetType, res, valueId));
+        return res;
+    }
+
+    public uint EmitBitcastI64ToU64(uint valueId)
+    {
+        BeginFunction();
+        var dstTy = GetIntTypeId(64, true);
+        var res = NewId();
+        func.Add(sw => sw.Write(Op.Bitcast, dstTy, res, valueId));
         return res;
     }
 
@@ -533,6 +614,7 @@ internal sealed class SpirvModuleBuilder
             return id;
         var newId = NewId();
         typesGlobals.Add(sw => sw.Write(Op.Constant, idInt, newId, unchecked((uint)value)));
+        constIds.Add(newId);
         constInt32[value] = newId;
         origins[newId] = new Origin
         {
@@ -566,6 +648,7 @@ internal sealed class SpirvModuleBuilder
             var high = (uint)((ulong)value >> 32);
             typesGlobals.Add(sw => sw.Write(Op.Constant, idLong, newId, low, high));
         }
+        constIds.Add(newId);
         constInt64[value] = newId;
         return newId;
     }
@@ -595,6 +678,32 @@ internal sealed class SpirvModuleBuilder
         var op = unsigned ? Op.UConvert : Op.SConvert;
         func.Add(sw => sw.Write(op, idInt, res, srcId));
         return res;
+    }
+
+    public uint EmitConvertU64ToI32(uint srcId)
+    {
+        BeginFunction();
+        var res = NewId();
+        func.Add(sw => sw.Write(Op.UConvert, idInt, res, srcId));
+        return res;
+    }
+
+    public uint EmitConstUInt64(ulong value)
+    {
+        EnsureInt64Capability();
+        if (idULong == 0)
+        {
+            idULong = NewId();
+            typesGlobals.Add(sw => sw.Write(Op.TypeInt, idULong, 64u, 0u));
+        }
+        var newId = NewId();
+        unchecked
+        {
+            var low = (uint)(value & 0xFFFFFFFFUL);
+            var high = (uint)(value >> 32);
+            typesGlobals.Add(sw => sw.Write(Op.Constant, idULong, newId, low, high));
+        }
+        return newId;
     }
 
     public void EmitReturn()
@@ -675,6 +784,13 @@ internal sealed class SpirvModuleBuilder
         return res;
     }
 
+    private void ValidateIntOperand(uint id)
+    {
+        if (valueIds.Contains(id)) return;
+        if (constIds.Contains(id)) return;
+        throw new InvalidOperationException($"SPIR-V int operand id {id} was not emitted as a value or constant");
+    }
+
     public void SetOrigin(uint resultId, string? method, string? valueKind, string? value)
     {
         var ordinal = func.Count;
@@ -710,6 +826,7 @@ internal sealed class SpirvModuleBuilder
         }
         // Emit sections in required order
         foreach (var c in capabilities) c(w);
+        foreach (var e in extensions) e(w);
         memoryModel?.Invoke(w);
         foreach (var e in entryAndModes) e(w);
         foreach (var a in annotations) a(w);
@@ -728,6 +845,7 @@ internal sealed class SpirvModuleBuilder
             func.Add(sw => sw.Write(Op.FunctionEnd));
         }
         foreach (var c in capabilities) c(w);
+        foreach (var e in extensions) e(w);
         memoryModel?.Invoke(w);
         foreach (var e in entryAndModes) e(w);
         foreach (var a in annotations) a(w);

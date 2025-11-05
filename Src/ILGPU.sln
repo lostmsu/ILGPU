@@ -53,6 +53,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VulkanBackendSample", "..\S
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ILGPU.Tests.Vulkan", "ILGPU.Tests.Vulkan\ILGPU.Tests.Vulkan.csproj", "{CEBEE462-FD7B-D021-C0AF-56105270C11B}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VulkanAlignRepro", "..\Samples\VulkanAlignRepro\VulkanAlignRepro.csproj", "{6185E90B-EBCC-82AE-762A-17EFEECBA81C}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -131,6 +133,10 @@ Global
 		{CEBEE462-FD7B-D021-C0AF-56105270C11B}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{CEBEE462-FD7B-D021-C0AF-56105270C11B}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{CEBEE462-FD7B-D021-C0AF-56105270C11B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6185E90B-EBCC-82AE-762A-17EFEECBA81C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6185E90B-EBCC-82AE-762A-17EFEECBA81C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6185E90B-EBCC-82AE-762A-17EFEECBA81C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6185E90B-EBCC-82AE-762A-17EFEECBA81C}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -149,6 +155,7 @@ Global
 		{422BA1AE-858D-4AA4-815B-CF42A429D305} = {7701FE3C-4187-401C-9612-44667203B0E5}
 		{6D11F61B-0CD4-01EB-3FDB-ED914A968C78} = {2924DA3E-34A4-40FD-8D41-398B4C9F00DA}
 		{CEBEE462-FD7B-D021-C0AF-56105270C11B} = {7701FE3C-4187-401C-9612-44667203B0E5}
+		{6185E90B-EBCC-82AE-762A-17EFEECBA81C} = {2924DA3E-34A4-40FD-8D41-398B4C9F00DA}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {22270DEE-D42D-479D-A76F-B2E7A5F7C949}

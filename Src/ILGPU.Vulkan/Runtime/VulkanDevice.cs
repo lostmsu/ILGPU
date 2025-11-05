@@ -117,8 +117,7 @@ public sealed unsafe class VulkanDevice : Device
             MaxNumThreadsPerGroup = maxInvocations,
             MaxSharedMemoryPerGroup = (int)limits.MaxComputeSharedMemorySize,
             MaxConstantMemory = 0,
-            // Conservative defaults; will refine when wiring full accelerator
-            WarpSize = 32,
+            WarpSize = 64,
             NumMultiprocessors = 1,
             MaxNumThreadsPerMultiprocessor = maxInvocations,
         };

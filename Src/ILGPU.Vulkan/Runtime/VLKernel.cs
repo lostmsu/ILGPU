@@ -118,29 +118,8 @@ public sealed class VLKernel : Kernel
         };
         vk.CreatePipelineLayout(dev, in plci, null, out _layout).ThrowOnError();
 
-        // Compute pipeline
-        var entryName = "main";
-        PipelineShaderStageCreateInfo ssc = new()
-        {
-            SType = StructureType.PipelineShaderStageCreateInfo,
-            Stage = ShaderStageFlags.ComputeBit,
-            Module = _module,
-            PName = (byte*)Silk.NET.Core.Native.SilkMarshal.StringToPtr(entryName),
-        };
-        try
-        {
-            ComputePipelineCreateInfo cpci = new()
-            {
-                SType = StructureType.ComputePipelineCreateInfo,
-                Stage = ssc,
-                Layout = _layout,
-            };
-            vk.CreateComputePipelines(dev, default, 1, in cpci, null, out _pipeline).ThrowOnError();
-        }
-        finally
-        {
-            Silk.NET.Core.Native.SilkMarshal.Free((nint)ssc.PName);
-        }
+        // Compute pipeline is created in EnsurePipeline(RuntimeKernelConfig) using
+        // specialization constants for LocalSizeId.
     }
 
     internal DescriptorSetLayout DescriptorSetLayout => _dsl;
@@ -148,4 +127,61 @@ public sealed class VLKernel : Kernel
     internal Pipeline Pipeline => _pipeline;
     internal int BindingCount => _compiled.Bindings?.Length ?? 0;
     internal int PushConstantCount => _compiled.PushConstantCount;
+
+    internal unsafe void EnsurePipeline(RuntimeKernelConfig config)
+    {
+        if (_pipeline.Handle != 0)
+            return;
+
+        // Create base pipeline state (module, layouts) if needed
+        EnsurePipeline();
+
+        var vk = _acc.Vk;
+        var dev = _acc.LogicalDevice;
+        var entryName = "main";
+        // Specialization constants for LocalSizeId with SpecId 0/1/2
+        Silk.NET.Vulkan.SpecializationMapEntry* entries = stackalloc Silk.NET.Vulkan.SpecializationMapEntry[3];
+        entries[0] = new Silk.NET.Vulkan.SpecializationMapEntry { ConstantID = 0, Offset = 0u, Size = (uint)sizeof(int) };
+        entries[1] = new Silk.NET.Vulkan.SpecializationMapEntry { ConstantID = 1, Offset = (uint)sizeof(int), Size = (uint)sizeof(int) };
+        entries[2] = new Silk.NET.Vulkan.SpecializationMapEntry { ConstantID = 2, Offset = (uint)(2 * sizeof(int)), Size = (uint)sizeof(int) };
+        int* data = stackalloc int[3];
+        data[0] = (int)config.GroupDim.X;
+        data[1] = (int)config.GroupDim.Y;
+        data[2] = (int)config.GroupDim.Z;
+        Silk.NET.Vulkan.SpecializationInfo spec = new Silk.NET.Vulkan.SpecializationInfo
+        {
+            MapEntryCount = 3,
+            PMapEntries = entries,
+            DataSize = (nuint)(3 * sizeof(int)),
+            PData = data,
+        };
+
+        var ssc = new PipelineShaderStageCreateInfo
+        {
+            SType = StructureType.PipelineShaderStageCreateInfo,
+            Stage = ShaderStageFlags.ComputeBit,
+            Module = _module,
+            PName = (byte*)Silk.NET.Core.Native.SilkMarshal.StringToPtr(entryName),
+            PSpecializationInfo = &spec,
+        };
+        try
+        {
+            var cpci = new ComputePipelineCreateInfo
+            {
+                SType = StructureType.ComputePipelineCreateInfo,
+                Stage = ssc,
+                Layout = _layout,
+            };
+            vk.CreateComputePipelines(dev, default, 1, in cpci, null, out _pipeline).ThrowOnError();
+        }
+        catch (AccessViolationException ave)
+        {
+            Console.Error.WriteLine($"[Vulkan] AccessViolation during CreateComputePipelines: {ave.Message}");
+            throw;
+        }
+        finally
+        {
+            Silk.NET.Core.Native.SilkMarshal.Free((nint)ssc.PName);
+        }
+    }
 }

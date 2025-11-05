@@ -280,8 +280,7 @@ namespace ILGPU.Tests
             var dataLength = length ?? data.Length;
             Assert.True(dataLength <= data.Length);
             Assert.Equal(dataLength, expected.Length);
-            for (int i = offset ?? 0, e = dataLength; i < e; ++i)
-                Assert.Equal(expected[i], data[i]);
+            Assert.Equal(expected, data);
         }
 
         /// <summary>

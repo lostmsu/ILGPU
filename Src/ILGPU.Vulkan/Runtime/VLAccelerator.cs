@@ -15,6 +15,7 @@ using VkDevice = Silk.NET.Vulkan.Device;
 using System;
 using System.Reflection;
 using ILGPU.Util;
+using System.Diagnostics;
 using System.Reflection.Emit;
 
 namespace ILGPU.Runtime.Vulkan;
@@ -41,6 +42,7 @@ public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulk
     private uint _queueFamilyIndex;
     private Queue _queue;
     private CommandPool _commandPool;
+    // Validation layer enablement (no debug messenger wiring here to avoid extra deps)
 
     public VLAccelerator(Context context, VulkanDevice device)
         : base(context, device)
@@ -305,18 +307,88 @@ public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulk
         };
         try
         {
+            // Discover available layers and extensions
+            bool wantValidation = true; // enable by default during backend bring-up
+            // Query layers
+            uint layerCount = 0;
+            _vk.EnumerateInstanceLayerProperties(ref layerCount, null);
+            var layers = new LayerProperties[layerCount > 0 ? layerCount : 0];
+            if (layerCount > 0)
+            {
+                fixed (LayerProperties* p = layers)
+                    _vk.EnumerateInstanceLayerProperties(ref layerCount, p);
+            }
+            bool hasValidation = false;
+            foreach (ref var lp in layers.AsSpan())
+            {
+                var name = PtrToString(ref lp.LayerName[0]);
+                if (name == "VK_LAYER_KHRONOS_validation") { hasValidation = true; break; }
+            }
+            // Query extensions
+            uint extCount = 0;
+            _vk.EnumerateInstanceExtensionProperties((byte*)null, ref extCount, null);
+            var exts = new ExtensionProperties[extCount > 0 ? extCount : 0];
+            if (extCount > 0)
+            {
+                fixed (ExtensionProperties* p = exts)
+                    _vk.EnumerateInstanceExtensionProperties((byte*)null, ref extCount, p);
+            }
+            bool hasDebugUtils = false;
+            foreach (ref var ep in exts.AsSpan())
+            {
+                var name = PtrToString(ref ep.ExtensionName[0]);
+                if (name == "VK_EXT_debug_utils") { hasDebugUtils = true; break; }
+            }
+
+            // Prepare name arrays
+            var enabledLayers = stackalloc byte*[1];
+            uint enabledLayerCount = 0;
+            if (wantValidation && hasValidation)
+            {
+                enabledLayers[enabledLayerCount++] = (byte*)SilkMarshal.StringToPtr("VK_LAYER_KHRONOS_validation");
+            }
+            var enabledExts = stackalloc byte*[1];
+            uint enabledExtCount = 0;
+            if (hasDebugUtils)
+                enabledExts[enabledExtCount++] = (byte*)SilkMarshal.StringToPtr("VK_EXT_debug_utils");
+
             InstanceCreateInfo ci = new()
             {
                 SType = StructureType.InstanceCreateInfo,
                 PApplicationInfo = &appInfo,
+                EnabledLayerCount = enabledLayerCount,
+                PpEnabledLayerNames = enabledLayerCount > 0 ? enabledLayers : null,
+                EnabledExtensionCount = enabledExtCount,
+                PpEnabledExtensionNames = enabledExtCount > 0 ? enabledExts : null,
             };
             _vk.CreateInstance(in ci, null, out _instance).ThrowOnError();
+
+            // Free allocated layer/extension strings
+            for (int i = 0; i < enabledLayerCount; i++) SilkMarshal.Free((nint)enabledLayers[i]);
+            for (int i = 0; i < enabledExtCount; i++) SilkMarshal.Free((nint)enabledExts[i]);
+
+            // Note: debug messenger not created to avoid additional extension bindings here.
         }
         finally
         {
             SilkMarshal.Free((nint)appInfo.PApplicationName);
             SilkMarshal.Free((nint)appInfo.PEngineName);
         }
+    }
+
+    private static unsafe uint DebugCallback(
+        DebugUtilsMessageSeverityFlagsEXT severity,
+        DebugUtilsMessageTypeFlagsEXT types,
+        DebugUtilsMessengerCallbackDataEXT* data,
+        void* userData)
+    {
+        try
+        {
+            string msg = SilkMarshal.PtrToString((nint)data->PMessage) ?? string.Empty;
+            Debug.WriteLine($"[VK] {severity} {types}: {msg}");
+        }
+        catch { /* best-effort logging */ }
+        return Vk.False;
     }
 
     private void PickPhysicalDeviceByName(string desiredName)
@@ -385,11 +457,19 @@ public sealed unsafe class VLAccelerator : KernelAccelerator<ILGPU.Backends.Vulk
             PQueuePriorities = &priority,
         };
 
+        // Enable shaderInt64 feature if supported (required by some tests)
+        PhysicalDeviceFeatures feats;
+        _vk.GetPhysicalDeviceFeatures(_physicalDevice, out feats);
+        var enableFeatures = new PhysicalDeviceFeatures();
+        if (feats.ShaderInt64)
+            enableFeatures.ShaderInt64 = Vk.True;
+
         DeviceCreateInfo dci = new()
         {
             SType = StructureType.DeviceCreateInfo,
             QueueCreateInfoCount = 1,
             PQueueCreateInfos = &dq,
+            PEnabledFeatures = &enableFeatures,
         };
 
         _vk.CreateDevice(_physicalDevice, in dci, null, out _device).ThrowOnError();

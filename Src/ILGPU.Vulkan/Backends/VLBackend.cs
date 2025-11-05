@@ -7,6 +7,8 @@
 // ---------------------------------------------------------------------------------------
 
 using ILGPU.Backends.EntryPoints;
+using ILGPU.IR.Transformations;
+using ILGPU.Backends.Vulkan.Transformations;
 using ILGPU.Runtime;
 using ILGPU.Runtime.Vulkan;
 using System;
@@ -28,8 +30,33 @@ public sealed class VLBackend : Backend
               BackendType.OpenCL, // placeholder enum until BackendType adds Vulkan
               new VLArgumentMapper(context))
     {
-        // Kernel transformers will be added as the backend matures.
+        // Initialize kernel transformers to match CL/PTX design.
+        InitializeKernelTransformers(builder =>
+        {
+            var transformerBuilder = Transformer.CreateBuilder(
+                TransformerConfiguration.Empty);
+            transformerBuilder.AddBackendOptimizations<CodePlacement.GroupOperands>(
+                new VLAcceleratorSpecializer(
+                    PointerType,
+                    context.Properties.EnableIOOperations),
+                context.Properties.InliningMode,
+                context.Properties.OptimizationLevel);
+            // Validate unsupported IR patterns post-lowering
+            transformerBuilder.Add(new Transformations.VLValidateUnsupportedTransformation());
+            builder.Add(transformerBuilder.ToTransformer());
+        });
     }
+
+    protected override EntryPoint CreateEntryPoint(
+        in EntryPointDescription entry,
+        in BackendContext backendContext,
+        in KernelSpecialization specialization) =>
+        new SeparateViewEntryPoint(
+            entry,
+            backendContext.SharedMemorySpecification,
+            specialization,
+            Context.TypeContext,
+            2);
 
     protected override CompiledKernel Compile(
         EntryPoint entryPoint,

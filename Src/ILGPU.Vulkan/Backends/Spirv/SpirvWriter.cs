@@ -70,6 +70,13 @@ internal sealed class SpirvWriter
         Write(Op.ExecutionMode, funcId, (uint)ExecutionMode.LocalSize, x, y, z);
     }
 
+    public void OpExtension(string name)
+    {
+        var raw = new System.Collections.Generic.List<uint>();
+        AppendString(raw, name);
+        EmitRaw(Op.Extension, raw);
+    }
+
     public byte[] ToArray()
     {
         // SPIR-V binary streams use 32-bit words, little-endian byte order.
