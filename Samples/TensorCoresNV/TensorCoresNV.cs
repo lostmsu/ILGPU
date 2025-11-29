@@ -1,6 +1,7 @@
 ﻿using Borg.Threading;
 using ILGPU;
 using ILGPU.Intrinsics.Cuda;
+using ILGPU.Runtime.Cuda;
 using System.Diagnostics;
 
 using static ILGPU.Kernels;
@@ -9,7 +10,14 @@ const int TILE_SIZE = 16;
 const int SIZE = 2048;
 const int MULTIPLICATIONS_PER_ITERATION = 100;
 
-using var context = Context.CreateDefault();
+using var context = Context.Create(builder => builder.Cuda());
+var device = context.GetCudaDevice(0);
+using var accelerator = device.CreateCudaAccelerator(context);
+
+var err = CudaAPI.CurrentAPI.GetProcAddress("cuTensorMapEncodeTiled",
+    cudaVersion: 12000,
+    DriverProcAddressFlags.CU_GET_PROC_ADDRESS_DEFAULT,
+    out nint cuTensorMapEncodeTiled);
 
 var sw = Stopwatch.StartNew();
 
@@ -20,7 +28,7 @@ var sw = Stopwatch.StartNew();
 /// <param name="a">A dense MxK matrix</param>
 /// <param name="b">A dense KxN matrix</param>
 /// <returns>A dense MxN matrix</returns>
-static async Task<double> MatrixMultiply(Accelerator accelerator, float[,] a, float[,] b,
+static async Task<double> MatrixMultiply(CudaAccelerator accelerator, float[,] a, float[,] b,
                                          TimeSpan iterationTimeout,
                                          CancellationToken cancel)
 {
@@ -38,8 +46,8 @@ static async Task<double> MatrixMultiply(Accelerator accelerator, float[,] a, fl
         ArrayView2D<MXFP4Block, Stride2D.DenseX>,
         ArrayView2D<MXFP4Block, Stride2D.DenseX>,
         ArrayView2D<BF16, Stride2D.DenseX>,
-        Blackwell.TMA.Descriptor,
-        Blackwell.TMA.Descriptor>(
+        Blackwell.TMA.TensorMap,
+        Blackwell.TMA.TensorMap>(
         Gemm);
     cancel.ThrowIfCancellationRequested();
 

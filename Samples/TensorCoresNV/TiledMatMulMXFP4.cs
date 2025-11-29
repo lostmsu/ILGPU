@@ -26,8 +26,8 @@ class Kernels
         ArrayView2D<MXFP4Block, Stride2D.DenseX> A,
         ArrayView2D<MXFP4Block, Stride2D.DenseX> B,
         ArrayView2D<BF16, Stride2D.DenseX> C,
-        Blackwell.TMA.Descriptor tmaA,
-        Blackwell.TMA.Descriptor tmaB)
+        Blackwell.TMA.TensorMap tmaA,
+        Blackwell.TMA.TensorMap tmaB)
     {
         if (!Blackwell.IsSupported || !Blackwell.WGMMA.IsSupported)
             return;
