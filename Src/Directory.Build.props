@@ -1,7 +1,7 @@
 ﻿<Project>
   <!-- Library Project Configuration -->
   <PropertyGroup>
-    <LibraryTargetFrameworks>net8.0</LibraryTargetFrameworks>
+    <LibraryTargetFrameworks>net10.0</LibraryTargetFrameworks>
     <LibraryLatestTargetFramework>$(LibraryTargetFrameworks)</LibraryLatestTargetFramework>
   </PropertyGroup>
   <PropertyGroup Condition="'$(GITHUB_ACTIONS)' == 'true'">
@@ -18,7 +18,7 @@
 
   <!-- Unit Test Project Configuration -->
   <PropertyGroup>
-    <LibraryUnitTestTargetFrameworks>net8.0</LibraryUnitTestTargetFrameworks>
+    <LibraryUnitTestTargetFrameworks>net10.0</LibraryUnitTestTargetFrameworks>
     <LibraryLatestUnitTestTargetFramework>$(LibraryUnitTestTargetFrameworks)</LibraryLatestUnitTestTargetFramework>
   </PropertyGroup>
   <PropertyGroup Condition="'$(GITHUB_ACTIONS)' == 'true'">
