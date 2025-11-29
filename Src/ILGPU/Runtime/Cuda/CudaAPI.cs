@@ -74,6 +74,20 @@ namespace ILGPU.Runtime.Cuda
             : Marshal.PtrToStringAnsi(ptr)
                 ?? RuntimeErrorMessages.CannotResolveErrorString;
 
+        /// <summary>
+        /// Retrieves a function pointer for a CUDA driver symbol via cuGetProcAddress.
+        /// </summary>
+        /// <param name="symbol">The driver API symbol name (e.g. "cuMemAllocAsync").</param>
+        /// <param name="cudaVersion">Minimum CUDA version required for the symbol.</param>
+        /// <param name="flags">Lookup flags controlling variant resolution.</param>
+        /// <param name="functionPtr">Filled with the resolved function pointer on success.</param>
+        /// <returns>The CUDA error status.</returns>
+        public CudaError GetProcAddress(
+            string symbol,
+            int cudaVersion,
+            DriverProcAddressFlags flags,
+            out IntPtr functionPtr) => cuGetProcAddress(symbol, out functionPtr, cudaVersion, flags);
+
         #endregion
 
         #region Device Methods

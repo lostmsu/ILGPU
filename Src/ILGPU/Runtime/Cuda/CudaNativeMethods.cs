@@ -53,6 +53,28 @@ namespace ILGPU.Runtime.Cuda
     }
 
     /// <summary>
+    /// Flags to control behavior of cuGetProcAddress.
+    /// </summary>
+    [Flags]
+    public enum DriverProcAddressFlags : ulong
+    {
+        /// <summary>
+        /// Default behavior.
+        /// </summary>
+        CU_GET_PROC_ADDRESS_DEFAULT = 0x0,
+
+        /// <summary>
+        /// Request legacy (non-PTDS) variants where applicable.
+        /// </summary>
+        CU_GET_PROC_ADDRESS_LEGACY = 0x1,
+
+        /// <summary>
+        /// Request per-thread default stream variants where applicable.
+        /// </summary>
+        CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM = 0x2,
+    }
+
+    /// <summary>
     /// Specifies a specific attribute kind of a Cuda device.
     /// </summary>
     public enum DeviceAttributeKind

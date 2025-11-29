@@ -72,6 +72,13 @@
     <Import Name="cuCtxDisablePeerAccess">
         <Parameter Name="peerContext" Type="IntPtr" />
     </Import>
+    <Import Name="cuGetProcAddress"
+            StringMarshalling="Utf8">
+        <Parameter Name="symbol" Type="string" />
+        <Parameter Name="pfn" Type="IntPtr" Flags="Out" />
+        <Parameter Name="cudaVersion" Type="int" />
+        <Parameter Name="flags" Type="DriverProcAddressFlags" />
+    </Import>
     <Import Name="cuDeviceGetP2PAttribute">
         <Parameter Name="value" Type="int" Flags="Out" />
         <Parameter Name="attrib" Type="Peer2PeerAttribute" />
