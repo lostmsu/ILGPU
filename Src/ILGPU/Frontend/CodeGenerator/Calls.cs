@@ -20,6 +20,8 @@ using ValueList = ILGPU.Util.InlineList<ILGPU.IR.Values.ValueReference>;
 
 namespace ILGPU.Frontend
 {
+    using Intrinsics = Intrinsic.Intrinsics;
+
     partial class CodeGenerator
     {
         /// <summary>

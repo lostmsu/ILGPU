@@ -23,6 +23,8 @@ using ValueList = ILGPU.Util.InlineList<ILGPU.IR.Values.ValueReference>;
 
 namespace ILGPU.Frontend
 {
+    using Intrinsics = Intrinsic.Intrinsics;
+
     /// <summary>
     /// A simple basic block in the scope of an IR code-generation process.
     /// </summary>

@@ -1,0 +1,20 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>$(LibrarySamplesTargetFrameworks)</TargetFrameworks>
+    <LangVersion>14.0</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>ILGPU</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Src\ILGPU\ILGPU.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Borg.Common" Version="0.0.2" />
+  </ItemGroup>
+
+</Project>
