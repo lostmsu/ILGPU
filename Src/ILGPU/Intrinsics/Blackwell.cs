@@ -65,60 +65,203 @@ public static class Blackwell
         {
             fixed ulong opaque[16];
 
+
             public enum DataType
             {
-                CU_TENSOR_MAP_DATA_TYPE_UINT8 = 0,
-                CU_TENSOR_MAP_DATA_TYPE_UINT16 = 1,
-                CU_TENSOR_MAP_DATA_TYPE_UINT32 = 2,
-                CU_TENSOR_MAP_DATA_TYPE_INT32 = 3,
-                CU_TENSOR_MAP_DATA_TYPE_UINT64 = 4,
-                CU_TENSOR_MAP_DATA_TYPE_INT64 = 5,
-                CU_TENSOR_MAP_DATA_TYPE_FLOAT16 = 6,
-                CU_TENSOR_MAP_DATA_TYPE_FLOAT32 = 7,
-                CU_TENSOR_MAP_DATA_TYPE_FLOAT64 = 8,
-                CU_TENSOR_MAP_DATA_TYPE_BFLOAT16 = 9,
-                CU_TENSOR_MAP_DATA_TYPE_FLOAT32_FTZ = 10,
-                CU_TENSOR_MAP_DATA_TYPE_TFLOAT32 = 11,
-                CU_TENSOR_MAP_DATA_TYPE_TFLOAT32_FTZ = 12,
+                /// <summary>
+                /// CU_TENSOR_MAP_DATA_TYPE_UINT8
+                /// </summary>
+                U8 = 0,
+                /// <summary>
+                /// CU_TENSOR_MAP_DATA_TYPE_UINT16
+                /// </summary>
+                U16 = 1,
+                /// <summary>
+                /// CU_TENSOR_MAP_DATA_TYPE_UINT32
+                /// </summary>
+                U32 = 2,
+                /// <summary>
+                /// CU_TENSOR_MAP_DATA_TYPE_INT32
+                /// </summary>
+                I32 = 3,
+                /// <summary>
+                /// CU_TENSOR_MAP_DATA_TYPE_UINT64
+                /// </summary>
+                U64 = 4,
+                /// <summary>
+                /// CU_TENSOR_MAP_DATA_TYPE_INT64
+                /// </summary>
+                I64 = 5,
+                /// <summary>
+                /// CU_TENSOR_MAP_DATA_TYPE_FLOAT16
+                /// </summary>
+                F16 = 6,
+                /// <summary>
+                /// CU_TENSOR_MAP_DATA_TYPE_FLOAT32
+                /// </summary>
+                F32 = 7,
+                /// <summary>
+                /// CU_TENSOR_MAP_DATA_TYPE_FLOAT64
+                /// </summary>
+                F64 = 8,
+                /// <summary>
+                /// CU_TENSOR_MAP_DATA_TYPE_BFLOAT16
+                /// </summary>
+                BF16 = 9,
+                /// <summary>
+                /// CU_TENSOR_MAP_DATA_TYPE_FLOAT32_FTZ
+                /// </summary>
+                F32_FTZ = 10,
+                /// <summary>
+                /// CU_TENSOR_MAP_DATA_TYPE_TFLOAT32
+                /// </summary>
+                TF32 = 11,
+                /// <summary>
+                /// CU_TENSOR_MAP_DATA_TYPE_TFLOAT32_FTZ
+                /// </summary>
+                TF32_FTZ = 12,
+                /// <summary>
+                /// '16 x U4' packed values to memory aligned as 8 bytes. There are no gaps between packed values.
+                /// CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B
+                /// </summary>
+                X16U4_Align8B,    // 4 bits
+                /// <summary>
+                /// '16 x U4' packed values to memory aligned as 16 bytes. There are 8 byte gaps between every 8 byte chunk of packed values.
+                /// CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B
+                /// </summary>
+                X16U4_Align16B,   // 4 bits
+                /// <summary>
+                /// '16 x U6' packed values to memory aligned as 16 bytes. There are 4 byte gaps between every 12 byte chunk of packed values.
+                /// CU_TENSOR_MAP_DATA_TYPE_16U6_ALIGN16B
+                /// </summary>
+                X16U6_Align16B,   // 6 bits
             }
 
             public enum Interleave
             {
-                CU_TENSOR_MAP_INTERLEAVE_NONE = 0,
-                CU_TENSOR_MAP_INTERLEAVE_16B = 1,
-                CU_TENSOR_MAP_INTERLEAVE_32B = 2,
+                /// <summary>
+                /// CU_TENSOR_MAP_INTERLEAVE_NONE
+                /// </summary>
+                NONE = 0,
+                /// <summary>
+                /// CU_TENSOR_MAP_INTERLEAVE_16B
+                /// </summary>
+                By16B = 1,
+                /// <summary>
+                /// CU_TENSOR_MAP_INTERLEAVE_32B
+                /// </summary>
+                By32B = 2,
             }
 
+            /// <summary>
+            /// L2 fetch size which indicates the
+            /// byte granularity at which requests are filled from DRAM
+            /// </summary>
             public enum L2Promotion
             {
-                CU_TENSOR_MAP_L2_PROMOTION_NONE = 0,
-                CU_TENSOR_MAP_L2_PROMOTION_L2_64B,
-                CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
-                CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                /// <summary>
+                /// CU_TENSOR_MAP_L2_PROMOTION_NONE
+                /// </summary>
+                NONE = 0,
+                /// <summary>
+                /// CU_TENSOR_MAP_L2_PROMOTION_64B
+                /// </summary>
+                L2_64B,
+                /// <summary>
+                /// CU_TENSOR_MAP_L2_PROMOTION_128B
+                /// </summary>
+                L2_128B,
+                /// <summary>
+                /// CU_TENSOR_MAP_L2_PROMOTION_256B
+                /// </summary>
+                L2_256B,
             }
 
+            /// <summary>
+            /// Shared memory bank swizzling pattern.
+            /// </summary>
+            /// <remarks>
+            /// Data are organized in a specific order in global memory;
+            /// however, this may not match the order in which the application
+            /// accesses data in shared memory.
+            /// This difference in data organization may cause bank conflicts
+            /// when shared memory is accessed. In order to avoid this problem, data can be loaded
+            /// to shared memory with shuffling across shared memory banks.
+            /// </remarks>
             public enum Swizzle
             {
-                CU_TENSOR_MAP_SWIZZLE_NONE = 0,
-                CU_TENSOR_MAP_SWIZZLE_32B,
-                CU_TENSOR_MAP_SWIZZLE_64B,
-                CU_TENSOR_MAP_SWIZZLE_128B,
+                /// <summary>
+                /// CU_TENSOR_MAP_SWIZZLE_NONE
+                /// </summary>
+                NONE = 0,
+                /// <summary>
+                /// CU_TENSOR_MAP_SWIZZLE_32B
+                /// </summary>
+                Span32B_Chunk16B = 1,
+                /// <summary>
+                /// CU_TENSOR_MAP_SWIZZLE_64B
+                /// </summary>
+                Span64B_Chunk16B = 2,
+                /// <summary>
+                /// CU_TENSOR_MAP_SWIZZLE_128B
+                /// </summary>
+                Span128B_Chunk16B = 3,
+                /// <summary>
+                /// Swizzle 32B chunks within 128B span
+                /// CU_TENSOR_MAP_SWIZZLE_128B_ATOM_32B
+                /// </summary>
+                Span128B_Chunk32B,
+                /// <summary>
+                /// Swizzle 32B chunks within 128B span, additionally swap lower 8B with upper 8B within each 16B for every alternate row
+                /// CU_TENSOR_MAP_SWIZZLE_128B_ATOM_32B_FLIP_8B
+                /// </summary>
+                Span128B_Chunk32B_Flip8B,
+                /// <summary>
+                /// Swizzle 64B chunks within 128B span
+                /// CU_TENSOR_MAP_SWIZZLE_128B_ATOM_64B
+                /// </summary>
+                Span128B_Chunk64B,
             }
 
+            /// <summary>
+            /// The value to use to fill out-of-bounds accesses
+            /// </summary>
             public enum FloatOOBfill
             {
-                CU_TENSOR_MAP_FLOAT_OOB_FILL_DEFAULT = 0,
-                CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA,
+                /// <summary>
+                /// CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+                /// </summary>
+                Zero = 0,
+                /// <summary>
+                /// CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA
+                /// </summary>
+                NaN,
             }
 
             public struct TensorRank
             {
-                public uint Rank { get; init; }
+                public TensorRank(uint rank)
+                {
+                    ArgumentOutOfRangeException.ThrowIfZero(rank);
+                    // limitation as of CUDA 13
+                    ArgumentOutOfRangeException.ThrowIfGreaterThan(rank, 5u);
+
+                    Rank = rank;
+                }
+                public uint Rank { get; }
             }
 
             public struct GlobalAddress
             {
-                public nint Address { get; init; }
+                public nint Address { get; }
+
+                public GlobalAddress(nint address)
+                {
+                    if ((address & 0xF) != 0)
+                        throw new ArgumentException("Global address must be 16-byte aligned", nameof(address));
+
+                    Address = address;
+                }
             }
         }
 
@@ -149,6 +292,76 @@ public static class Blackwell
             {
                 ThrowPlatformNotSupported();
             }
+            ArgumentNullException.ThrowIfNull(globalDim);
+            ArgumentNullException.ThrowIfNull(globalStrides);
+            ArgumentNullException.ThrowIfNull(boxDim);
+            ArgumentNullException.ThrowIfNull(elementStrides);
+
+            if (interleave != TensorMap.Interleave.NONE)
+            {
+                if (rank.Rank < 3)
+                    throw new ArgumentOutOfRangeException(nameof(rank), "Interleaving requires rank of at least 3.");
+            }
+
+            int elementBytes = Bytes(dataType);
+
+            bool requiresAlign32 = interleave is TensorMap.Interleave.By32B
+                || dataType is TensorMap.DataType.X16U6_Align16B
+                            or TensorMap.DataType.X16U4_Align16B;
+            if (requiresAlign32 && (globalAddress.Address & 0x1F) != 0)
+                throw new ArgumentOutOfRangeException(nameof(globalAddress), "Global address must be 32-byte aligned");
+
+            for (int dim = 0; dim < rank.Rank; dim++)
+            {
+                string dimName = $"{nameof(globalDim)}[{dim}]";
+                if (globalDim[dim] == 0)
+                    throw new ArgumentOutOfRangeException(dimName, "Global dimension must be non-zero.");
+                if (globalDim[dim] > 0x1_0000_0000ul)
+                    throw new ArgumentOutOfRangeException(dimName, "Global dimension exceeds maximum supported size.");
+
+                string strideName = $"{nameof(globalStrides)}[{dim}]";
+                if (dim < rank.Rank - 1)
+                {
+                    if ((globalStrides[dim] & 0xF) != 0)
+                        throw new ArgumentOutOfRangeException(strideName, $"{strideName} must be a multiple of 16.");
+                    if (globalStrides[dim] >= 1ul << 40)
+                        throw new ArgumentOutOfRangeException(strideName, $"{strideName} exceeds maximum supported size.");
+                    if (requiresAlign32 && (globalStrides[dim] & 0x1F) != 0)
+                        throw new ArgumentOutOfRangeException(strideName, $"{strideName} must be a multiple of 32.");
+                }
+
+                string boxDimName = $"{nameof(boxDim)}[{dim}]";
+                ArgumentOutOfRangeException.ThrowIfZero(boxDim[dim], boxDimName);
+                ArgumentOutOfRangeException.ThrowIfGreaterThan(boxDim[dim], 256u, boxDimName);
+
+                if (dim == 0)
+                {
+                    bool requiresMultiply128 = dataType is TensorMap.DataType.X16U6_Align16B
+                        or TensorMap.DataType.X16U4_Align16B;
+                    if (requiresMultiply128 && (globalDim[dim] & 0x7F) != 0)
+                    {
+                        throw new ArgumentOutOfRangeException(dimName, $"{dimName} must be a multiple of 128.");
+                    }
+
+                    bool requiresMultiply2 = dataType is TensorMap.DataType.X16U4_Align8B;
+                    if (requiresMultiply2 && (globalDim[dim] & 0x1) != 0)
+                    {
+                        throw new ArgumentOutOfRangeException(dimName, $"{dimName} must be a multiple of 2.");
+                    }
+
+                    if (interleave == TensorMap.Interleave.NONE
+                        && (boxDim[dim] * elementBytes) % 16 != 0)
+                    {
+                        throw new ArgumentOutOfRangeException(boxDimName, $"{boxDimName} must be a multiple of 16.");
+                    }
+
+                    if (requiresMultiply128 && boxDim[dim] != 128)
+                    {
+                        throw new ArgumentOutOfRangeException(boxDimName, $"{boxDimName} must be 128.");
+                    }
+                }
+            }
+
             return cuTensorMapEncodeTiled(
                 out map,
                 dataType,
@@ -163,6 +376,17 @@ public static class Blackwell
                 l2Promotion,
                 floatOOBfill);
         }
+
+        static int Bytes(TensorMap.DataType type) => type switch
+        {
+            TensorMap.DataType.BF16
+                or TensorMap.DataType.F16 => 2,
+            TensorMap.DataType.F32 => 4,
+            TensorMap.DataType.F64
+                or TensorMap.DataType.I64
+                or TensorMap.DataType.U64 => 8,
+            _ => throw new NotImplementedException(type.ToString()),
+        };
 
         public readonly struct Barrier { }
 
@@ -188,16 +412,16 @@ public static class Blackwell
         static TMA()
         {
             if (CudaAPI.CurrentAPI.GetProcAddress(
-                    "cuTensorMapEncodeTiled",
+                    nameof(cuTensorMapEncodeTiled),
                     cudaVersion: 12000,
                     DriverProcAddressFlags.CU_GET_PROC_ADDRESS_DEFAULT,
-                    out nint procAddress) == CudaError.CUDA_SUCCESS)
+                    out nint procAddress) is CudaError.CUDA_SUCCESS)
             {
                 cuTensorMapEncodeTiled = (delegate*<out TensorMap, TensorMap.DataType, TensorMap.TensorRank,
-                TensorMap.GlobalAddress, ulong*, ulong*,
-                uint*, uint*,
-                TensorMap.Interleave, TensorMap.Swizzle, TensorMap.L2Promotion, TensorMap.FloatOOBfill,
-                CudaError>)procAddress;
+                    TensorMap.GlobalAddress, ulong*, ulong*,
+                    uint*, uint*,
+                    TensorMap.Interleave, TensorMap.Swizzle, TensorMap.L2Promotion, TensorMap.FloatOOBfill,
+                    CudaError>)procAddress;
             }
         }
     }
